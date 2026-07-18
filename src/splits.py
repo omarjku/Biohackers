@@ -1,6 +1,6 @@
 """
 splits.py — genome clustering + grouped train/calibration/test splits
-Owner: Person A (Pipeline Lead)
+Owner: Waji (pipeline)
 
 This is the file that protects every number we report.
 
@@ -183,10 +183,14 @@ def grouped_split(
     Split row positions into train / calibration / test with no cluster spanning
     two splits.
 
-    Clusters are allocated whole. When `y` is supplied, clusters are dealt out
-    largest-first to whichever split is furthest below its target size — this
-    keeps the small splits from collapsing to a single huge cluster, which is
-    the usual failure mode when a handful of clusters dominate the dataset.
+    Clusters are allocated whole, largest first, so the constrained items are
+    placed while there is still room for them.
+
+    Supplying `y` makes the allocation label-aware: each cluster goes to the
+    split furthest behind on its per-class targets, which keeps resistance
+    prevalence comparable across the three splits. Without `y` only row counts
+    are balanced, and prevalence can drift far enough to invalidate calibration
+    — pass labels whenever you have them.
 
     `groups` and `y` must be aligned row-for-row with the feature matrix, i.e.
     exactly what Dataset.xy_for_drug() hands back.
@@ -212,12 +216,12 @@ def grouped_split(
             "check the Mash threshold before trusting any metric from this run."
         )
 
-    targets = {
-        "train": (1 - test_size - calibration_size) * n,
-        "calibration": calibration_size * n,
-        "test": test_size * n,
+    fractions = {
+        "train": 1 - test_size - calibration_size,
+        "calibration": calibration_size,
+        "test": test_size,
     }
-    assigned: dict[str, list[int]] = {k: [] for k in targets}
+    assigned: dict[str, list[int]] = {k: [] for k in fractions}
 
     # Largest clusters first: place the constrained items while there is still
     # room to place them.
@@ -226,10 +230,64 @@ def grouped_split(
     # Break size ties randomly so the split is not an artefact of cluster naming.
     order = sorted(order, key=lambda g: (-len(members[g]), rng.random()))
 
-    for g in order:
-        deficits = {k: targets[k] - len(assigned[k]) for k in targets}
-        pick = max(deficits, key=deficits.get)
-        assigned[pick].extend(members[g])
+    if y is None:
+        # No labels supplied — balance row counts only.
+        targets = {k: frac * n for k, frac in fractions.items()}
+        for g in order:
+            deficits = {k: targets[k] - len(assigned[k]) for k in targets}
+            assigned[max(deficits, key=deficits.get)].extend(members[g])
+    else:
+        # Label-aware allocation. Balancing row counts alone lets resistance
+        # prevalence drift badly between splits: a cluster is usually
+        # phenotypically homogeneous, so whole clusters of resistant genomes land
+        # together. On the synthetic set that produced 40% resistant in train vs
+        # 70% in test for ciprofloxacin — which makes a Platt curve fitted on one
+        # prevalence flatly wrong for the other, and makes every metric jump
+        # around with the seed.
+        #
+        # So each cluster goes to the split that is furthest behind on the
+        # classes that cluster actually carries, measured as relative deviation
+        # from that split's per-class target. Summing over classes keeps total
+        # size balanced too, since class targets add up to size targets.
+        y_arr = np.asarray(y)
+        classes = np.unique(y_arr)
+        class_totals = {c: int((y_arr == c).sum()) for c in classes}
+        targets = {
+            k: {c: frac * class_totals[c] for c in classes}
+            for k, frac in fractions.items()
+        }
+        counts = {k: {c: 0 for c in classes} for k in fractions}
+
+        for g in order:
+            cluster_counts = {c: int((y_arr[members[g]] == c).sum()) for c in classes}
+            size = len(members[g])
+
+            def deficit(split_name: str) -> float:
+                """How far behind its per-class targets this split is, weighted by
+                what the cluster in hand actually carries."""
+                total = 0.0
+                for c in classes:
+                    target = targets[split_name][c]
+                    # Deficits are normalized by the target so each class
+                    # contributes on a comparable scale — otherwise the majority
+                    # class dominates the sum and a rare resistant class gets
+                    # little say in where its clusters land. Measured against an
+                    # un-normalized (absolute) deficit on the synthetic set the
+                    # two are equivalent (spread 0.023 vs 0.021, train fraction
+                    # 0.640 vs 0.651); the normalization is a hedge for skewed
+                    # real data, not a demonstrated win. Do not "simplify" it
+                    # away without re-measuring on a low-prevalence drug.
+                    remaining = (target - counts[split_name][c]) / max(target, 1.0)
+                    # Weighted by the cluster's own class mix, so a
+                    # resistant-heavy cluster is steered to whichever split is
+                    # short of resistant genomes.
+                    total += (cluster_counts[c] / size) * remaining
+                return total
+
+            pick = max(fractions, key=deficit)
+            assigned[pick].extend(members[g])
+            for c in classes:
+                counts[pick][c] += cluster_counts[c]
 
     split = GroupedSplit(
         train=np.sort(np.array(assigned["train"], dtype=int)),
