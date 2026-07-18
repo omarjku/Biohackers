@@ -1,6 +1,6 @@
 """
 synth_data.py — generate contract-shaped fixtures so Module 02 can be built now
-Owner: Person A (Pipeline Lead)
+Owner: Waji (pipeline)
 
 Writes the four files described in docs/DATA_CONTRACT.md into data/synthetic/.
 Real data is then a path change, not a rewrite:

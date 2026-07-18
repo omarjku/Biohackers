@@ -1,6 +1,6 @@
 """
 calibration.py — Platt scaling + no-call logic
-Owner: Person A (Pipeline Lead)
+Owner: Waji (pipeline)
 
 Added AFTER predictor.py has trained models (needs a held-out calibration
 set + Mash distances). Fills in the final `confidence` and `no_call_reason`
@@ -13,4 +13,4 @@ no_call triggers per the brief:
   3. drug target not found (-> handled as "not_applicable", not "no_call")
 """
 
-# TODO(Person A): CalibratedClassifierCV (Platt scaling) + no-call gate
+# TODO(Waji): CalibratedClassifierCV (Platt scaling) + no-call gate

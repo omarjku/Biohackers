@@ -1,6 +1,6 @@
 """
 predictor.py — Module 02 core: features -> raw predictions
-Owner: Person A (Pipeline Lead)
+Owner: Waji (pipeline)
 
 One L2-regularized logistic regression per antibiotic, fit on the train slice
 of a grouped split. Emits schemas.Prediction objects; calibration.py then
@@ -22,7 +22,7 @@ Three things here are deliberate and worth not "simplifying" away:
 3. evidence_category never gets promoted to "known_gene_or_mutation" on the
    strength of a model coefficient. A large coefficient means correlation in
    our training set — possibly a hitchhiker gene riding along with a real
-   mechanism. Only genes on Person B's curated list count as hard evidence;
+   mechanism. Only genes on Moncef's curated list count as hard evidence;
    everything else the model leans on is "statistical_association".
 
 Confidence emitted here is the raw, UNCALIBRATED sigmoid output. It is a
@@ -72,7 +72,7 @@ def _parse_feature_name(name: str) -> tuple[str, str | None]:
 
 def _known_resistance_genes(drug: str) -> list[str]:
     """
-    Curated resistance genes for a drug, from Person B's lookup.
+    Curated resistance genes for a drug, from Moncef's lookup.
 
     Returns [] when drug_database.py has not filled this in yet, which degrades
     every prediction to "statistical_association" — the honest failure mode. We

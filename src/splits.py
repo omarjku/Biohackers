@@ -1,6 +1,6 @@
 """
 splits.py — genome clustering + grouped train/calibration/test splits
-Owner: Person A (Pipeline Lead)
+Owner: Waji (pipeline)
 
 This is the file that protects every number we report.
 

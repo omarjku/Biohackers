@@ -1,6 +1,6 @@
 """
 data_io.py — loading + validation of Module 01 inputs
-Owner: Person A (Pipeline Lead)
+Owner: Waji (pipeline)
 
 Implements the input side of the interface: see docs/DATA_CONTRACT.md.
 schemas.py defines what the pipeline emits; this defines what it consumes.
