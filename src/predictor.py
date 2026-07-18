@@ -153,12 +153,44 @@ class DrugModel:
         return [name for name, _ in present]
 
 
+def cluster_sample_weights(groups: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """
+    Per-row weights that de-duplicate near-identical genomes and balance classes.
+
+    Grouped splitting stops leakage but does nothing about redundancy WITHIN
+    train. BV-BRC is full of outbreak isolates and resequenced strains, so a
+    single clonal expansion can dominate the fit: on the synthetic set the top
+    three clusters are ~33% of training rows for every drug. The model then
+    learns that one lineage's quirks and calls it a resistance mechanism.
+
+    The brief asks for de-duplication. Dropping rows is the crude version — it
+    throws away the real within-cluster variation that does exist. Weighting
+    each genome by 1/(size of its cluster) instead makes every CLUSTER count
+    once regardless of how many times it was sequenced, while keeping every row.
+
+    Class balance is then applied on top of those weights, not before: sklearn's
+    class_weight="balanced" is computed from raw class counts and would be
+    wrong once rows carry unequal weight. Returns weights summing to len(y).
+    """
+    _, inverse, counts = np.unique(groups, return_inverse=True, return_counts=True)
+    weights = 1.0 / counts[inverse]
+
+    # Equalize total weight per class, so a rare resistant class still moves the
+    # loss as much as the majority does.
+    for c in np.unique(y):
+        mask = y == c
+        weights[mask] *= len(y) / (2.0 * weights[mask].sum())
+
+    return weights * len(y) / weights.sum()
+
+
 def fit_drug_model(
     dataset: Dataset,
     drug: str,
     train_rows: np.ndarray,
     groups: np.ndarray,
     C: float = DEFAULT_C,
+    weight_by_cluster: bool = True,
 ) -> DrugModel:
     """Fit one antibiotic's model on the given training row positions."""
     X, y, _ = dataset.xy_for_drug(drug)
@@ -172,17 +204,24 @@ def fit_drug_model(
             "into one cluster."
         )
 
-    # class_weight balanced: resistance prevalence varies wildly by drug, and an
-    # unweighted fit on a 5%-resistant drug learns to answer "susceptible" always.
+    # Weighting: cluster_sample_weights() handles both de-duplication and class
+    # balance, so class_weight is left off to avoid applying the latter twice.
+    # Without it, fall back to class_weight="balanced" — resistance prevalence
+    # varies wildly by drug, and an unweighted fit on a 5%-resistant drug learns
+    # to answer "susceptible" always.
     # L2 is the solver default; naming it explicitly is deprecated as of
     # sklearn 1.8, so the regularization is set through C alone.
+    sample_weight = None
+    if weight_by_cluster:
+        sample_weight = cluster_sample_weights(groups[train_rows], y_train)
+
     estimator = LogisticRegression(
         C=C,
-        class_weight="balanced",
+        class_weight=None if weight_by_cluster else "balanced",
         solver="liblinear",
         max_iter=2000,
     )
-    estimator.fit(X_train.to_numpy(dtype=float), y_train)
+    estimator.fit(X_train.to_numpy(dtype=float), y_train, sample_weight=sample_weight)
 
     all_targets = {
         gene
@@ -221,6 +260,7 @@ class Predictor:
         drugs: list[str] | None = None,
         C: float = DEFAULT_C,
         seed: int = 0,
+        weight_by_cluster: bool = True,
     ) -> Predictor:
         """
         Fit one model per drug, each on its own grouped split.
@@ -229,13 +269,18 @@ class Predictor:
         ciprofloxacin are not the set tested for gentamicin, so one global split
         would not be cluster-disjoint for every drug. Each split is retained so
         calibration.py can reuse the matching calibration slice without refitting.
+
+        weight_by_cluster de-duplicates within the training slice — see
+        cluster_sample_weights(). Turn it off only to reproduce the unweighted
+        baseline for comparison; it should stay on for anything reported.
         """
         predictor = cls()
         for drug in drugs or dataset.drugs:
             _, y, groups = dataset.xy_for_drug(drug)
             split = grouped_split(groups, y=y, seed=seed)
             predictor.models[drug] = fit_drug_model(
-                dataset, drug, split.train, groups, C=C
+                dataset, drug, split.train, groups, C=C,
+                weight_by_cluster=weight_by_cluster,
             )
             predictor.splits[drug] = split
         return predictor
