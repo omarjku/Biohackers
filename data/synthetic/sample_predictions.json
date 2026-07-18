@@ -1,0 +1,72 @@
+[
+  {
+    "sample_id": "SIM-001",
+    "species": "Escherichia coli",
+    "drug": "Ceftriaxone",
+    "call": "likely_to_fail",
+    "confidence": 0.94,
+    "evidence_category": "known_gene_or_mutation",
+    "supporting_features": [
+      {"gene": "blaCTX-M-15", "mutation": null, "note": "ESBL, hydrolyzes third-gen cephalosporins"}
+    ],
+    "target_gate_status": "present",
+    "no_call_reason": null
+  },
+  {
+    "sample_id": "SIM-002",
+    "species": "Escherichia coli",
+    "drug": "Ciprofloxacin",
+    "call": "likely_to_work",
+    "confidence": 0.88,
+    "evidence_category": "no_known_signal",
+    "supporting_features": [],
+    "target_gate_status": "present",
+    "no_call_reason": null
+  },
+  {
+    "sample_id": "SIM-003",
+    "species": "Escherichia coli",
+    "drug": "Gentamicin",
+    "call": "likely_to_fail",
+    "confidence": 0.61,
+    "evidence_category": "statistical_association",
+    "supporting_features": [
+      {"gene": "aac(3)-IIa", "mutation": null, "note": "co-occurs with resistance in training data, mechanism not confirmed for this isolate"}
+    ],
+    "target_gate_status": "present",
+    "no_call_reason": null
+  },
+  {
+    "sample_id": "SIM-004",
+    "species": "Escherichia coli",
+    "drug": "Ampicillin",
+    "call": "no_call",
+    "confidence": 0.52,
+    "evidence_category": "statistical_association",
+    "supporting_features": [],
+    "target_gate_status": "present",
+    "no_call_reason": "calibrated probability in the 0.3-0.7 uncertain range"
+  },
+  {
+    "sample_id": "SIM-005",
+    "species": "Escherichia coli",
+    "drug": "Colistin",
+    "call": "no_call",
+    "confidence": 0.5,
+    "evidence_category": "no_known_signal",
+    "supporting_features": [],
+    "target_gate_status": "unknown",
+    "no_call_reason": "genome is dissimilar to training data (high Mash distance) — out of distribution"
+  },
+  {
+    "sample_id": "SIM-006",
+    "species": "Escherichia coli",
+    "drug": "Aztreonam",
+    "call": "not_applicable",
+    "confidence": 0.0,
+    "evidence_category": "no_known_signal",
+    "supporting_features": [],
+    "target_gate_status": "absent",
+    "no_call_reason": null
+  }
+]

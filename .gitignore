@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+models/*.joblib
+models/*.pkl
+data/raw/*
+!data/raw/.gitkeep
+.DS_Store
+venv/
+.venv/
