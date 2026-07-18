@@ -126,17 +126,25 @@ overlaps.
 
 ### The headline number
 
-Same model, random split vs. grouped split, balanced accuracy on synthetic data:
+Same model, random split vs. grouped split, balanced accuracy on synthetic data, mean ± sd over 8
+seeds:
 
 | drug | random | grouped | gap |
 |---|---|---|---|
-| Ciprofloxacin | 0.956 | 0.648 | **+0.308** |
-| Gentamicin | 0.933 | 0.699 | +0.233 |
-| Meropenem | 0.803 | 0.690 | +0.113 |
-| Ceftriaxone | 0.925 | 0.923 | +0.003 |
+| Meropenem | 0.786 ±0.071 | 0.654 ±0.056 | **+0.132** |
+| Gentamicin | 0.932 ±0.013 | 0.823 ±0.052 | **+0.109** |
+| Ciprofloxacin | 0.901 ±0.029 | 0.900 ±0.046 | 0.000 |
+| Ceftriaxone | 0.917 ±0.033 | 0.918 ±0.017 | −0.001 |
 
-This gap is the pitch. Report the grouped numbers as the real ones. Ceftriaxone shows the leak is
-not universal — don't claim it is.
+The gap is the pitch, but state it honestly: it is real for two of four drugs and absent for the
+other two. Report the grouped numbers as the real ones.
+
+**These numbers replace an earlier, inflated table** (Ciprofloxacin +0.308, Gentamicin +0.233).
+That version was measured before `grouped_split()` was label-aware, when the allocator was leaving
+Ciprofloxacin at 40% resistant in train against 70% in test. Most of that apparent "leakage
+penalty" was the grouped model being scored against a differently-balanced test set, not leakage.
+Do not resurrect the old figures — if anyone quotes +0.308, it came from our own bug. Always
+average over several seeds; single-seed gaps still swing by ±0.05.
 
 ### Decisions made (don't silently reverse)
 
@@ -158,9 +166,15 @@ not universal — don't claim it is.
 - **No de-duplication.** The brief asks for it; we do grouped *splitting*, which stops leakage, but
   large clusters still dominate training (biggest = 19% of train rows). Consider per-cluster
   sample weights.
-- **`grouped_split()` balances cluster size, not label.** Ciprofloxacin lands at 40% resistant in
-  train vs 70% in test. Metrics are unstable across seeds because of it; report across several
-  seeds or make the allocator label-aware.
+- ~~`grouped_split()` balances cluster size, not label.~~ **Fixed.** The allocator now sends each
+  cluster to the split furthest behind on its per-class targets, weighted by the cluster's own
+  class mix. Ciprofloxacin went from 40/35/70 to 45.4/44.9/45.7 percent resistant across
+  train/calibration/test, split sizes still ~65/15/20. Do NOT rewrite the deficit as a
+  squared-deviation-from-target cost: that rewards hitting a target, so the small splits fill
+  first and train collapses to ~34% of rows. Measured, and pinned by `tests/test_splits.py`.
+  (Relative vs. absolute class deficits, by contrast, were measured equivalent — spread 0.023 vs
+  0.021. An earlier note here claimed absolute deficits starve the small splits; that was
+  asserted without measurement and was wrong.)
 - **`drug_database.KNOWN_RESISTANCE_GENES` does not exist yet** — that exact symbol is what
   `predictor.py` imports. Until Moncef adds it, every prediction is `statistical_association`.
 
