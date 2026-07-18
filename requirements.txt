@@ -3,6 +3,8 @@ pytest
 scikit-learn
 pandas
 numpy
+scipy
+datasketch
 biopython
 streamlit
 openai
