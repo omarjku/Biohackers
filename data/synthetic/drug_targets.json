@@ -1,0 +1,22 @@
+{
+  "Ceftriaxone": {
+    "target_genes": [
+      "ftsI",
+      "mrdA"
+    ],
+    "note": "penicillin-binding proteins"
+  },
+  "Ciprofloxacin": {
+    "target_genes": [
+      "gyrA",
+      "parC"
+    ],
+    "note": "DNA gyrase / topoisomerase IV"
+  },
+  "Gentamicin": {
+    "target_genes": [
+      "rpsL"
+    ],
+    "note": "30S ribosomal subunit"
+  }
+}
