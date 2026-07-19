@@ -67,7 +67,7 @@ Actual layout (as of 2026-07-19; paths are relative to this file's directory, `*
     genome_reader.py      # Module 01: AMRFinderPlus -> feature matrix (has a CLI)
     drug_database.py      # antibiotic -> target gene + curated resistance genes
     app.py              * # Streamlit frontend
-  tests/                  # 101 tests: splits, predictor, calibration, genome_reader, explainer
+  tests/                  # 118 tests: splits, predictor, calibration, genome_reader, explainer
   reports/                # synthetic evaluation output
   reports_real/           # real-data evaluation output
   models/                 # EMPTY — nothing trained/saved yet
@@ -118,10 +118,20 @@ files in `data/processed/`: **119 E. coli genomes x 124 AMR features, 143 label 
 (Ampicillin 41, Ciprofloxacin 51, Trimethoprim 51). Run `python src/adapt_real_data.py`, then
 evaluate with `run_full_evaluation(Path("data/processed"), Path("reports_real"))`.
 
-The dataset is small enough that the confidence intervals, not the means, are the honest story —
-see "What the real numbers actually say" below before quoting anything. As of 2026-07-19 the real
-numbers are considerably stronger than they were earlier the same day, because of the curated-count
-feature in `predictor.py`; that section and the "Decisions made" entry explain what changed.
+**That 119-genome set is no longer the best data available.** `src/fetch_bvbrc.py` (Omar) rebuilds
+the whole matrix from the public BV-BRC Data API — **2,127 genomes · 139 features · 444 MLST
+clusters**, no AMRFinderPlus, no Docker, no FASTA download — and `reports_real_scaled/` is what to
+quote. See "What the real numbers actually say" below and `docs/BVBRC_DATA.md`.
+
+**The two paths both write `data/processed/`, so running one overwrites the other's input.**
+`adapt_real_data.py` puts the 119-genome ALLELE matrix there; `fetch_bvbrc.py` puts the 2,127-genome
+FAMILY matrix there. They are different feature vocabularies and their numbers are not comparable
+row-for-row — always say which produced a figure. `docs/REPRODUCING.md` §8 is the runbook.
+
+Sample size no longer drives the confidence intervals the way it did: standard deviations went from
+±0.10 to ±0.01–0.04 when the dataset scaled. Two things still shape the real numbers — the
+curated-count feature in `predictor.py` (see "Decisions made") and, on the scaled set, the fact that
+Ciprofloxacin's known-gene evidence is empty because of an upstream tokeniser bug.
 
 Built and running: `schemas.py` (shared Prediction contract), `data_io.py` (contract loader +
 validation, against `docs/DATA_CONTRACT.md`), `splits.py` (MinHash/Mash clustering, grouped
@@ -142,7 +152,7 @@ LLM constraints, disclaimer — run `python verify_patch.py`).
 `TODO(UI owner)`, no upload screen, no results dashboard, no call into `explainer.py`. **`models/`
 is still empty and nothing in `src/` serializes a model**; see "Known gaps to fix".
 
-Test suite: 101 tests, all passing (`python -m pytest tests/ -q`).
+Test suite: 118 tests, all passing (`python -m pytest tests/ -q`).
 
 Labels live in `data/` (E. coli taxon 562). `labels_sampled.csv` is the working set: 2,400 rows,
 columns `genome_id,genome_name,antibiotic,phenotype,lab_method` — filter on `lab_method` to keep
@@ -208,6 +218,27 @@ Do not resurrect the old figures — if anyone quotes +0.308, it came from our o
 average over several seeds; single-seed gaps still swing by ±0.05.
 
 ### What the real numbers actually say
+
+**QUOTE THIS TABLE.** Scaled real data (BV-BRC API, 2,127 genomes · 139 features · 444 MLST
+clusters), 8 grouped seeds, in `reports_real_scaled/`. Rebuild with `python src/fetch_bvbrc.py`
+then `run_full_evaluation(Path("data/processed"), Path("reports_real_scaled"))`.
+
+| drug | n_test | coverage | bal_acc | recall_R | recall_S | AUROC | PR-AUC | brier raw → cal |
+|---|---|---|---|---|---|---|---|---|
+| Ampicillin | 375 | 91.5 ±1.4 | 0.930 ±0.010 | 0.923 ±0.015 | 0.939 ±0.015 | 0.947 ±0.008 | 0.961 ±0.006 | 0.084 → 0.074 |
+| Ciprofloxacin | 384 | 84.4 ±2.5 | 0.853 ±0.011 | 0.760 ±0.030 | 0.946 ±0.010 | 0.908 ±0.004 | 0.773 ±0.017 | 0.116 → 0.102 |
+| Trimethoprim | 174 | 85.1 ±1.6 | 0.915 ±0.019 | 0.881 ±0.037 | 0.948 ±0.006 | 0.935 ±0.007 | 0.904 ±0.017 | 0.094 → 0.096 |
+
+All three drugs are scoreable in every seed, standard deviations are 0.01–0.04 instead of ±0.10,
+and no drug depends on a 9-row slice. Two honest caveats to state alongside it: `recall_R` is still
+the weak side on Ciprofloxacin (0.760 — the models miss resistant cases more often than susceptible
+ones, the dangerous direction in this domain), and calibration slightly *worsens* Trimethoprim's
+Brier (0.094 → 0.096) while helping the other two. Ciprofloxacin is also the drug whose evidence
+layer is currently empty — see the `_feature_token()` bug in "Known gaps".
+
+The 119-genome AMRFinderPlus table below is the earlier baseline, kept because it is a different
+feature vocabulary (alleles, not families) and is what `reports_real/` regenerates. **It is no
+longer the headline — do not quote its 1.000s.**
 
 Real data, 8 grouped seeds. Regenerate with `run_full_evaluation(Path("data/processed"),
 Path("reports_real"))`. `scoreable` counts seeds where the answered rows held BOTH classes —
@@ -464,6 +495,61 @@ he has authored no commits so far.
 
 Shared, changed by agreement only: `schemas.py` (the cross-module contract — Hazem's file, but
 everyone depends on it), `docs/DATA_CONTRACT.md`, `requirements.txt`, this file.
+
+### Building `app.py` — what the UI owner needs
+
+`app.py` is the last real stub. Everything upstream of it works; this is the contract to build
+against, verified against the code on 2026-07-19. Nobody else should implement this file.
+
+**The call sequence.** There is no saved model — `models/` holds only `.gitkeep` and nothing in
+`src/` serializes anything. So the app fits on startup and reuses the objects:
+
+```python
+import sys; sys.path.insert(0, "src")
+from pathlib import Path
+from data_io import load_dataset
+from predictor import Predictor
+from calibration import Calibrator, predict_calibrated
+from explainer import explain
+
+dataset    = load_dataset(Path("data/processed"))
+predictor  = Predictor.fit(dataset, seed=0)        # seconds at this data size
+calibrator = Calibrator.fit(dataset, predictor)    # reuses predictor.splits — do not refit splits
+
+predictions = predict_calibrated(dataset, predictor, calibrator, genome_id)
+cards = [explain(pred, use_llm=True) for pred in predictions]
+```
+
+Fit **once** at startup (`@st.cache_resource`), not per request. `Calibrator.fit` deliberately
+reuses `predictor.splits`; building a new split there silently breaks the cluster-disjointness
+guarantee that the whole grouped-split claim rests on.
+
+**Rule 5 is on you, and the type system will not catch it.** `schemas.Prediction` has **no
+`disclaimer` field** — `verify_patch.py` reports this as an open GAP. Only `ExplanationResult`
+carries the disclaimer, and it is a required field there. So: **render `ExplanationResult`, never a
+bare `Prediction`.** If you render Predictions directly, or add a JSON export of them, results ship
+with no disclaimer and that violates a non-negotiable rule. Adding the field to `schemas.py` needs
+team agreement (Hazem's file, everyone depends on it) — raise it, don't patch it locally.
+
+**Four things not to show:**
+
+- **Never surface `_curated_count`** (`predictor.CURATED_COUNT`). It is a model input, not evidence
+  — "`_curated_count` detected" means nothing to a clinician, and the genes behind it are already
+  reported individually. It is already in `evidence_exclusions`; just don't add it back.
+- **Don't present the target gate as an active filter.** All three real drugs report
+  `target_gate_status="unknown"`, because AMRFinderPlus only emits an essential gene when it is
+  mutated. That is honest-by-construction, not a check doing work. `"not_applicable"` can still
+  appear on synthetic demo data.
+- **Don't render evidence tier as a confidence signal.** `statistical_association` is a *category*,
+  not a weaker probability. Keep the calibrated number and the evidence tier visually separate.
+- **Ciprofloxacin currently has no known-gene evidence on the scaled dataset**, so every
+  ciprofloxacin card will read `statistical_association`. That is the `_feature_token()` bug in
+  "Known gaps", not something to paper over in the UI.
+
+**Show the no-call properly.** `no_call` is a real, designed outcome with `no_call_reason` filled
+in, not an error state — around 9–16% of predictions on the scaled data. A judge looking for
+honest uncertainty handling will look for exactly this, so give it a first-class card, not a
+greyed-out row.
 
 ### If you are working with Claude on this repo
 
