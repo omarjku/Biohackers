@@ -111,9 +111,15 @@ train/calibration/test split), `synth_data.py` + `data/synthetic/` (seeded fixtu
 `explainer.py` + `tests/test_explainer.py`, `predictor.py` (per-drug logistic regression, target
 gate, evidence tiering).
 
-Still one-line TODO stubs, no implementation — each with its owner: `calibration.py` (Waji),
-`genome_reader.py` and `drug_database.py` (Moncef, both blocking downstream work), `app.py` (UI
-owner), `evaluation.py` (unassigned). `models/` is empty — nothing has been trained and saved.
+Also built: `calibration.py` (Platt scaling on the third split, no-call gate, OOD envelope),
+`evaluation.py` (per-drug metrics, per-cluster breakdown, random-vs-grouped comparison, and a
+four-panel dashboard — run `python src/evaluation.py`, writes to `reports/`), and
+`verify_patch.py` at the repo root (biosecurity compliance harness: de-duplication, target gate,
+LLM constraints, disclaimer — run `python verify_patch.py`).
+
+Still one-line TODO stubs, no implementation — each with its owner: `genome_reader.py` and
+`drug_database.py` (Moncef, both blocking downstream work), `app.py` (UI owner). `models/` is
+empty — nothing has been trained and saved.
 
 **`data/raw/` is empty — there is no real feature matrix yet.** Labels exist in `data/` (E. coli
 taxon 562; ampicillin, ciprofloxacin, trimethoprim). `labels_sampled.csv` is the working set:
@@ -127,17 +133,33 @@ overlaps.
 ### The headline number
 
 Same model, random split vs. grouped split, balanced accuracy on synthetic data, mean ± sd over 8
-seeds:
+seeds. Regenerate with `python src/evaluation.py`.
 
 | drug | random | grouped | gap |
 |---|---|---|---|
-| Meropenem | 0.786 ±0.071 | 0.654 ±0.056 | **+0.132** |
-| Gentamicin | 0.932 ±0.013 | 0.823 ±0.052 | **+0.109** |
-| Ciprofloxacin | 0.901 ±0.029 | 0.900 ±0.046 | 0.000 |
-| Ceftriaxone | 0.917 ±0.033 | 0.918 ±0.017 | −0.001 |
+| Meropenem | 0.770 ±0.066 | 0.676 ±0.039 | **+0.094** |
+| Ciprofloxacin | 0.902 ±0.030 | 0.842 ±0.049 | **+0.060** |
+| Gentamicin | 0.946 ±0.025 | 0.887 ±0.035 | **+0.059** |
+| Ceftriaxone | 0.934 ±0.028 | 0.911 ±0.014 | +0.023 |
 
-The gap is the pitch, but state it honestly: it is real for two of four drugs and absent for the
-other two. Report the grouped numbers as the real ones.
+The gap is the pitch, but state it honestly: it is modest, and it is largest on the drug we predict
+worst (Meropenem, grouped balanced accuracy 0.676 — barely above useful). Report the grouped
+numbers as the real ones.
+
+**This table was re-measured on 2026-07-19 after per-cluster sample weights landed (`5bc80ae`),
+and it replaces the previous version** (Meropenem +0.132, Gentamicin +0.109, Ciprofloxacin 0.000,
+Ceftriaxone −0.001). That version was not wrong when written — it was measured with
+`weight_by_cluster=False`, which was the only behaviour that existed then. Setting that flag False
+today still reproduces it (Meropenem +0.144, Gentamicin +0.110, Ciprofloxacin −0.018, Ceftriaxone
+−0.002), so the two tables are the same experiment under different weighting, not a bug fix.
+
+What changed and why it matters: de-duplication weighting moves *both* columns, and it moved the
+qualitative story. Under the old unweighted default the gap was real for two drugs and absent for
+two — the honest caveat was "it doesn't reproduce everywhere." With cluster weighting on, every
+drug shows a positive gap, because down-weighting redundant clusters costs the grouped model some
+accuracy on the drugs whose signal came from a few large clades (Ciprofloxacin grouped 0.900 →
+0.842) while raising the leaky random baseline. **Always state which weighting a quoted gap came
+from** — the flag changes the conclusion, not just the decimals.
 
 **These numbers replace an earlier, inflated table** (Ciprofloxacin +0.308, Gentamicin +0.233).
 That version was measured before `grouped_split()` was label-aware, when the allocator was leaving
