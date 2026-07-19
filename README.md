@@ -1,3 +1,18 @@
+---
+title: Genome Firewall
+emoji: 🧬
+colorFrom: green
+colorTo: blue
+sdk: docker
+app_port: 8501
+pinned: false
+license: mit
+---
+
+<!-- The block above is Hugging Face Space metadata (used only when this repo is
+     pushed to a HF Docker Space). GitHub renders it as a small YAML block; it is
+     harmless. See docs/DEPLOY_HF.md. -->
+
 # Genome Firewall
 
 AI defense system predicting antibiotic resistance from bacterial genome data.
