@@ -275,8 +275,12 @@ def _bio_stat_text(pred: Prediction) -> tuple[str, str]:
     )
 
 
-def report_item(pred: Prediction, use_llm: bool = False) -> dict:
-    """One antibiotic -> the frontend JSON object (see the app's JSON spec)."""
+def report_item(pred: Prediction, use_llm: bool = True) -> dict:
+    """One antibiotic -> the frontend JSON object (see the app's JSON spec).
+
+    LLM refinement is ON by default; it falls back to the deterministic template
+    whenever no OPENAI_API_KEY is set or the API call fails, so this is always safe.
+    """
     bio, stat = _bio_stat_text(pred)
     if use_llm and os.environ.get("OPENAI_API_KEY"):
         bio, stat = _llm_refine_report(pred, bio, stat)
@@ -293,9 +297,81 @@ def report_item(pred: Prediction, use_llm: bool = False) -> dict:
     }
 
 
-def explain_report(preds: list[Prediction], use_llm: bool = False) -> list[dict]:
-    """Full per-genome report array for the frontend."""
+def explain_report(preds: list[Prediction], use_llm: bool = True) -> list[dict]:
+    """Full per-genome report array for the frontend. LLM on by default (safe fallback)."""
     return [report_item(p, use_llm=use_llm) for p in preds]
+
+
+# --- 5. Overall AI clinical summary (synthesises all drugs into one narrative) ---
+
+def _template_summary(preds: list[Prediction]) -> str:
+    """Deterministic one-paragraph synthesis — the always-safe fallback."""
+    if not preds:
+        return "No antibiotics were evaluated for this sample."
+    works = [p.drug for p in preds if p.call == "likely_to_work"]
+    fails = [p.drug for p in preds if p.call == "likely_to_fail"]
+    holds = [p.drug for p in preds if p.call in ("no_call", "not_applicable")]
+    species = preds[0].species
+    bits = []
+    if works:
+        bits.append(f"predicted to remain effective against this {species} sample: "
+                    f"{', '.join(works)}")
+    if fails:
+        bits.append(f"predicted to fail (resistance indicated): {', '.join(fails)}")
+    if holds:
+        bits.append(f"no confident call (insufficient or ambiguous evidence): "
+                    f"{', '.join(holds)}")
+    body = "; ".join(bits) if bits else "no confident calls could be made"
+    return (f"Across {len(preds)} antibiotics, {body}. "
+            "These are sequence-based predictions and must be confirmed by "
+            "standard laboratory susceptibility testing before any clinical use.")
+
+
+def clinical_summary(preds: list[Prediction], use_llm: bool = True) -> str:
+    """
+    A short clinician-facing synthesis of the whole report. LLM-refined when a key
+    is available, otherwise the deterministic template. Honesty-guarded: an LLM
+    summary that names a gene absent from any prediction is rejected.
+    """
+    base = _template_summary(preds)
+    if not (use_llm and os.environ.get("OPENAI_API_KEY") and preds):
+        return base
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        compact = [
+            {"drug": p.drug, "call": p.call, "evidence_category": p.evidence_category,
+             "confidence": round(p.confidence, 3),
+             "genes": [f.gene for f in p.supporting_features]}
+            for p in preds
+        ]
+        system = (
+            "You write a 2-3 sentence clinical summary of an antibiotic-resistance "
+            "report for a clinician. Rules: only restate facts in the input; never "
+            "invent genes or mutations; never state a treatment decision or dosing; "
+            "keep known-mechanism vs statistical-association honesty; end by noting "
+            "results need laboratory confirmation."
+        )
+        import json as _json
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": _json.dumps(compact)}],
+            temperature=0.2,
+            max_tokens=220,
+        )
+        text = resp.choices[0].message.content.strip()
+        # honesty guard against the union of all listed genes
+        allowed = {f.gene.lower() for p in preds for f in p.supporting_features}
+        allowed |= {DRUG_LOCUS.get(p.drug, "").lower() for p in preds}
+        for tok in _AMR_TOKEN.findall(text):
+            t = tok.lower()
+            if t not in allowed and not any(t in a or a in t for a in allowed if a):
+                return base
+        return text or base
+    except Exception:  # noqa: BLE001 — any failure falls back to the template
+        return base
 
 
 def _llm_refine_report(pred: Prediction, bio: str, stat: str) -> tuple[str, str]:
