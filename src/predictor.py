@@ -157,6 +157,9 @@ class DrugModel:
     #: `feature_names` then holds FAMILY names, and any raw genome row must be
     #: aggregated through this mapping before it can be scored.
     family_map: dict[str, str] | None = None
+    #: Curated genes summed into the CURATED_COUNT column, when the model was
+    #: fitted with it. Needed to rebuild that column for a single genome.
+    counted_genes: list[str] = field(default_factory=list)
 
     def probability_resistant(self, row: pd.Series) -> float:
         """P(resistant) for one genome. Uncalibrated."""
@@ -165,7 +168,14 @@ class DrugModel:
                 dtype=float
             )
         else:
-            x = row.reindex(self.feature_names).fillna(0).to_numpy(dtype=float)
+            values = row.reindex(self.feature_names).fillna(0)
+            if self.counted_genes:
+                # Rebuild the summary column from this genome's own alleles; it is
+                # not present on a raw feature row.
+                values[CURATED_COUNT] = float(
+                    sum(row.get(gene, 0) for gene in self.counted_genes)
+                )
+            x = values.to_numpy(dtype=float)
         return float(self.estimator.predict_proba(x.reshape(1, -1))[0, 1])
 
     def positive_drivers(self, row: pd.Series) -> list[str]:
@@ -255,6 +265,53 @@ def gene_family(feature_name: str) -> str:
     return _ALLELE_SUFFIX.sub("", feature_name) or feature_name
 
 
+#: Name of the synthetic count column. Leading underscore so it cannot collide
+#: with an AMRFinderPlus element symbol, and so it is easy to filter out of
+#: anything user-facing — it is a model input, never evidence.
+CURATED_COUNT = "_curated_count"
+
+
+def curated_count_column(X: pd.DataFrame, drug: str) -> pd.Series | None:
+    """
+    How many of this drug's curated resistance genes are present, per genome.
+
+    Returns None when the drug has no curated genes, so the caller can skip the
+    column entirely rather than adding a constant zero.
+
+    Why this exists: resistance here is carried by many rare alleles — 25 curated
+    ampicillin genes, mostly one or two genomes each. Spread across 124 columns
+    and fitted on 25-33 rows, each gets a coefficient too small to matter, which
+    is what compresses the probabilities. Summing them restores a single dense
+    signal WITHOUT discarding the individual columns, which is where gene-family
+    aggregation went wrong: that merged alleles and lost the resolution, this
+    adds a summary and keeps it.
+
+    The count is a deterministic function of feature columns and
+    drug_database.KNOWN_RESISTANCE_GENES. No label, row, or split membership is
+    consulted, so computing it over the whole matrix leaks nothing. The curated
+    lists themselves were derived from AMRFinderPlus amr_class/amr_subclass
+    annotations, never from phenotypes.
+
+    Measured on the real data, and it recovers textbook AMR biology:
+
+        drug            0 curated genes    threshold for resistance
+        Ampicillin      0R / 17S           >=1 gene -> 23R / 1S
+        Trimethoprim    3R / 31S           >=1 gene -> 17R / 0S
+        Ciprofloxacin   1R / 29S           >=3 genes -> 10R / 0S
+
+    Ampicillin and trimethoprim are near-perfect single-gene rules — any
+    beta-lactamase hydrolyses ampicillin, any acquired dfrA defeats
+    trimethoprim. Ciprofloxacin needing SEVERAL is the known stepwise
+    fluoroquinolone mechanism: one QRDR mutation gives reduced susceptibility,
+    clinical resistance takes more. The model is not being told this; it falls
+    out of counting curated genes.
+    """
+    curated = [g for g in _known_resistance_genes(drug) if g in X.columns]
+    if not curated:
+        return None
+    return X[curated].sum(axis=1)
+
+
 def aggregate_to_families(X: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
     """
     Collapse a genome x allele matrix to genome x family, presence-wise.
@@ -318,9 +375,19 @@ def fit_drug_model(
     C: float = DEFAULT_C,
     weight_by_cluster: bool = True,
     aggregate_families: bool = False,
+    curated_count: bool = True,
 ) -> DrugModel:
     """Fit one antibiotic's model on the given training row positions."""
     X, y, _ = dataset.xy_for_drug(drug)
+
+    # One dense summary of the drug's curated resistance genes, alongside — not
+    # instead of — the individual allele columns. See curated_count_column().
+    counted_genes: list[str] = []
+    if curated_count and not aggregate_families:
+        counts = curated_count_column(X, drug)
+        if counts is not None:
+            counted_genes = [g for g in _known_resistance_genes(drug) if g in X.columns]
+            X = X.assign(**{CURATED_COUNT: counts})
 
     # Collapse allelic variants into gene families before fitting — see
     # gene_family(). The mapping is a pure function of the column name, so doing
@@ -373,10 +440,14 @@ def fit_drug_model(
         feature_names=list(X.columns),
         target_genes=dataset.target_genes(drug),
         known_genes=_known_resistance_genes(drug),
-        evidence_exclusions=frozenset(all_targets),
+        # CURATED_COUNT is a model input, never evidence — "_curated_count
+        # detected" is meaningless to a clinician, and the genes behind it are
+        # already reported individually.
+        evidence_exclusions=frozenset(all_targets | {CURATED_COUNT}),
         n_train=len(train_rows),
         n_train_clusters=len(set(groups[train_rows])),
         family_map=family_map,
+        counted_genes=counted_genes,
     )
 
 

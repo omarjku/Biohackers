@@ -117,8 +117,10 @@ files in `data/processed/`: **119 E. coli genomes x 124 AMR features, 143 label 
 (Ampicillin 41, Ciprofloxacin 51, Trimethoprim 51). Run `python src/adapt_real_data.py`, then
 evaluate with `run_full_evaluation(Path("data/processed"), Path("reports_real"))`.
 
-The dataset is small enough that this is a working pipeline, not a competitive model — see
-"What the real numbers actually say" below before quoting anything.
+The dataset is small enough that the confidence intervals, not the means, are the honest story —
+see "What the real numbers actually say" below before quoting anything. As of 2026-07-19 the real
+numbers are considerably stronger than they were earlier the same day, because of the curated-count
+feature in `predictor.py`; that section and the "Decisions made" entry explain what changed.
 
 Built and running: `schemas.py` (shared Prediction contract), `data_io.py` (contract loader +
 validation, against `docs/DATA_CONTRACT.md`), `splits.py` (MinHash/Mash clustering, grouped
@@ -135,8 +137,11 @@ LLM constraints, disclaimer — run `python verify_patch.py`).
 `genome_reader.py` and `drug_database.py` are implemented (Moncef, plus fixes below).
 `genome_reader.py` now has a CLI — `python src/genome_reader.py --fasta-dir <dir> --out-dir <dir>`
 — that annotates concurrently, caches each TSV so a failed batch resumes, and emits both
-`features.csv` and `gene_metadata.csv`. **`app.py` is still a one-line stub (UI owner)** and
-`models/` is still empty.
+`features.csv` and `gene_metadata.csv`. **`app.py` is still the only real stub** — a docstring and a
+`TODO(UI owner)`, no upload screen, no results dashboard, no call into `explainer.py`. **`models/`
+is still empty and nothing in `src/` serializes a model**; see "Known gaps to fix".
+
+Test suite: 101 tests, all passing (`python -m pytest tests/ -q`).
 
 Labels live in `data/` (E. coli taxon 562). `labels_sampled.csv` is the working set: 2,400 rows,
 columns `genome_id,genome_name,antibiotic,phenotype,lab_method` — filter on `lab_method` to keep
@@ -164,13 +169,20 @@ seeds. Regenerate with `python src/evaluation.py`.
 | drug | random | grouped | gap |
 |---|---|---|---|
 | Meropenem | 0.770 ±0.066 | 0.676 ±0.039 | **+0.094** |
-| Ciprofloxacin | 0.902 ±0.030 | 0.842 ±0.049 | **+0.060** |
 | Gentamicin | 0.946 ±0.025 | 0.887 ±0.035 | **+0.059** |
 | Ceftriaxone | 0.934 ±0.028 | 0.911 ±0.014 | +0.023 |
+| Ciprofloxacin | 0.933 ±0.021 | 0.919 ±0.037 | +0.014 |
 
 The gap is the pitch, but state it honestly: it is modest, and it is largest on the drug we predict
 worst (Meropenem, grouped balanced accuracy 0.676 — barely above useful). Report the grouped
 numbers as the real ones.
+
+**Ciprofloxacin's row was re-measured on 2026-07-19 after the curated-count feature landed** (was
+0.902 / 0.842 / +0.060). Only Ciprofloxacin moved, and only because it is the ONE synthetic drug
+that has curated genes in `drug_database.KNOWN_RESISTANCE_GENES` — the other three synthetic drugs
+get no count column, so their rows are byte-identical. The count mostly helped the grouped model
+(0.842 → 0.919), which shrank the gap. Do not read that as leakage getting worse; it is the
+grouped model getting better.
 
 **This table was re-measured on 2026-07-19 after per-cluster sample weights landed (`5bc80ae`),
 and it replaces the previous version** (Meropenem +0.132, Gentamicin +0.109, Ciprofloxacin 0.000,
@@ -202,31 +214,40 @@ decision metrics are undefined otherwise and are reported as NaN rather than a f
 
 | drug | coverage | bal_acc | scoreable | recall_R | AUROC | brier raw → cal |
 |---|---|---|---|---|---|---|
-| Ampicillin | 25.0 ±17.4 | 0.500 ±0.000 | **1 of 8** | 1.000 | 0.894 ±0.104 | 0.194 → 0.171 |
-| Ciprofloxacin | 80.7 ±8.4 | 0.821 ±0.175 | 7 of 8 | 0.643 ±0.350 | 0.859 ±0.144 | 0.183 → 0.108 |
-| Trimethoprim | 42.5 ±22.2 | 0.700 ±0.245 | 5 of 8 | 0.400 ±0.490 | 0.940 ±0.062 | 0.193 → 0.142 |
+| Ampicillin | 55.6 ±22.9 | 1.000 ±0.000 | 7 of 8 | 1.000 ±0.000 | 1.000 ±0.000 | 0.152 → 0.090 |
+| Ciprofloxacin | 92.0 ±7.1 | 0.896 ±0.108 | 8 of 8 | 0.792 ±0.216 | 0.865 ±0.138 | 0.151 → 0.066 |
+| Trimethoprim | 73.8 ±13.2 | 0.911 ±0.094 | 8 of 8 | 0.823 ±0.188 | 0.961 ±0.054 | 0.176 → 0.095 |
+
+**This table replaces a much weaker one, measured before the curated-count feature landed**
+(Ampicillin coverage 25.0 / bal_acc 0.500 / scoreable 1 of 8; Ciprofloxacin 80.7 / 0.821 / 7 of 8;
+Trimethoprim 42.5 / 0.700 / 5 of 8). Same data, same splits, same seeds — the only change is the
+`_curated_count` column. See "Decisions made" below. The old table's central complaint, that
+Ampicillin was degenerate and never answered a susceptible genome, is **fixed**: it now answers
+55.6% of test rows and both classes appear in 7 of 8 seeds.
 
 How to read this honestly:
 
-- **The models are real.** AUROC 0.86–0.94 means the biology is being learned. Calibration now
-  improves Brier on all three drugs.
-- **The decisions are weak and seed-dependent.** Test slices are 9–11 genomes, so those standard
-  deviations are the story, not the means. Never quote a single split.
-- **Ampicillin is degenerate.** It only ever answers genomes that are truly resistant — measured
-  over 8 seeds, ZERO test rows ever landed below the 0.30 no-call floor (p5 of its calibrated
-  distribution is 0.368). So its answered slice is single-class almost always, `recall_S` is 0 by
-  construction, and `bal_acc` 0.500 is the honest reading. When it does answer resistant it is
-  right 23 of 24 times. The fix is more data, not a wider band.
-- **`recall_R` is the weak side everywhere.** The models miss resistant cases far more often than
-  they misclassify susceptible ones. In this domain that is the dangerous direction.
+- **The models are real, and now the decisions are too.** AUROC 0.865–1.000, and all three drugs are
+  scoreable in nearly every seed instead of one or five.
+- **Ampicillin's 1.000s are a 9-genome test slice, not a solved problem.** Perfect scores on ~5
+  answered rows per seed are what a near-perfect single-gene rule looks like at this sample size,
+  not evidence of a perfect model. Quote it with the denominator attached, every time.
+- **Still seed-dependent.** Test slices are 9–11 genomes. The standard deviations remain the story
+  — Ciprofloxacin's `recall_R` is 0.792 ±0.216. Never quote a single split.
+- **`recall_R` is still the weak side**, though much less so (0.400 → 0.823 on Trimethoprim,
+  0.643 → 0.792 on Ciprofloxacin). The models still miss resistant cases more often than they
+  misclassify susceptible ones, which in this domain is the dangerous direction.
+- **Calibration improves Brier on all three drugs**, and by more than before (Ciprofloxacin
+  0.151 → 0.066).
 
-**The leakage gap does NOT reproduce on real data.** Measured mean gap is ≈ −0.01 with enormous
-spread (±0.234 on Ciprofloxacin random). That is not a failure — it follows from the clustering:
-only ONE genome pair sits below Mash 0.002, so this sample has almost no clonal redundancy and a
-grouped split is nearly a random split. A collection built from outbreak isolates would behave
-completely differently. Say this out loud rather than hiding it; "we measured our own headline
-claim and it didn't hold here, and here is why" is a stronger position than a number that breaks
-under questioning.
+**The leakage gap does NOT reproduce on real data**, and the curated-count change did not rescue
+it — measured gaps are now Trimethoprim +0.028, Ampicillin −0.052, Ciprofloxacin −0.109, i.e. two
+of three drugs score *better* on a grouped split than a random one, with huge spread (±0.229 on
+Ciprofloxacin random). That is not a failure — it follows from the clustering: only ONE genome pair
+sits below Mash 0.002, so this sample has almost no clonal redundancy and a grouped split is nearly
+a random split. A collection built from outbreak isolates would behave completely differently. Say
+this out loud rather than hiding it; "we measured our own headline claim and it didn't hold here,
+and here is why" is a stronger position than a number that breaks under questioning.
 
 ### Decisions made (don't silently reverse)
 
@@ -255,6 +276,28 @@ under questioning.
   does not raise on single-class `y_true` — it silently degrades to plain accuracy. That reported
   ampicillin at 0.917 alongside `recall_R` 1.000 and `recall_S` 0.000, three numbers that cannot
   all be true. Guarded by `evaluation._decision_metrics_defined()`.
+- **The curated-count feature is ON** (`fit_drug_model(curated_count=True)`, default). One extra
+  column, `predictor.CURATED_COUNT` = `"_curated_count"`, holding how many of that drug's
+  `KNOWN_RESISTANCE_GENES` the genome carries — added *alongside* the individual allele columns,
+  never replacing them. Why: resistance here is carried by many rare alleles (25 curated ampicillin
+  genes, mostly one or two genomes each). Spread over 124 columns and fitted on 25–33 rows, each
+  coefficient is too small to matter, which is what compressed the probabilities into the no-call
+  band. This is the change that took Ampicillin from "answers 25% of rows, all resistant" to
+  "answers 56%, both classes, scoreable in 7 of 8 seeds" — full before/after in the real-numbers
+  table above. It is the opposite trade to gene-family aggregation below: that one merges alleles
+  and *loses* resolution, this one adds a summary and *keeps* it.
+  - **It leaks nothing.** The count is a deterministic function of feature columns and the curated
+    gene lists. No label, no row identity, no split membership is consulted, so computing it over
+    the whole matrix before splitting is safe — same argument as the family map.
+  - **It is a model input, never evidence.** `CURATED_COUNT` is in `evidence_exclusions`;
+    "`_curated_count` detected" means nothing to a clinician and the genes behind it are already
+    reported individually. Do not surface it in the UI.
+  - It is skipped when `aggregate_families=True` (the two are alternative treatments of the same
+    problem) and when the drug has no curated genes, in which case the column is omitted rather
+    than added as a constant zero. This is why only Ciprofloxacin's synthetic row moved.
+  - The counted genes are stored on `DrugModel.counted_genes` so `probability_resistant()` can
+    rebuild the column for a single raw genome row at inference time. A raw feature row does not
+    carry it.
 - **Gene-family aggregation is available but OFF** (`fit_drug_model(aggregate_families=False)`).
   Collapsing allelic variants (`blaTEM-1/-12/-30` → `blaTEM`) is biologically sound and widens
   probability spread, but measured end-to-end it helps Trimethoprim on every metric and hurts the
@@ -273,16 +316,39 @@ under questioning.
 
 ### Known gaps to fix
 
-- **THE binding constraint: 143 label rows.** Everything weak about the model is downstream of
-  this. Only 119 of the 2,154 genome ids have FASTAs, giving 25–33 training rows and 7–8
-  calibration rows per drug. Nothing in the modelling layer substitutes for more genomes — fetch
-  the rest from BV-BRC and run the `genome_reader.py` CLI. Estimated cost at 2,154 genomes: ~11 GB
-  download, and note `splits.py`'s pure-Python MinHash took 19 minutes for 119 genomes (≈5.7 hours
-  extrapolated), so scaling also means swapping it for the real `mash`/`sourmash` binary.
+- **THE binding constraint: 143 label rows.** Only 119 of the 2,154 genome ids have FASTAs, giving
+  25–33 training rows and 7–8 calibration rows per drug, and 9–11 test rows. Every standard
+  deviation in the real-numbers table is downstream of this. Fetch the rest from BV-BRC and run the
+  `genome_reader.py` CLI. Estimated cost at 2,154 genomes: ~11 GB download, and note `splits.py`'s
+  pure-Python MinHash took 19 minutes for 119 genomes (≈5.7 hours extrapolated), so scaling also
+  means swapping it for the real `mash`/`sourmash` binary.
+  **Amended 2026-07-19:** this used to read "nothing in the modelling layer substitutes for more
+  genomes." The curated-count feature substantially disproved that — it roughly doubled coverage and
+  made all three drugs scoreable without a single new genome. Sample size is still what caps the
+  *confidence intervals*, and no feature engineering will shrink a 9-row test slice, but do not use
+  "we need more data" to wave away modelling questions.
+- **Nothing is persisted — `models/` holds only `.gitkeep`.** There is no `joblib`/`pickle` code
+  anywhere in `src/`; every model is fitted in-memory inside an evaluation run and discarded. This
+  blocks `app.py`: a UI either retrains per request (seconds, on this data size — tolerable for a
+  demo) or someone adds save/load first. Decide which before building the frontend, and note a
+  saved model must also persist `counted_genes` and `family_map` or `probability_resistant()` will
+  score raw genome rows wrongly.
 - ~~No de-duplication.~~ **Done.** `cluster_sample_weights()` weights each genome by 1/(cluster
   size) and equalises class weight on top, so every cluster counts once regardless of how often it
   was sequenced. Note this already applies class balancing — do NOT add `class_weight="balanced"`
   on top, it would be applied twice.
+- **Three open biosecurity gaps, reported by `verify_patch.py` itself** (13 PASS / 3 GAP / 0 FAIL —
+  no control is broken, but these three are inert or incomplete). Run it before any demo; it prints
+  them with owners:
+  - `schemas.Prediction` has no `disclaimer` field, so any consumer rendering Predictions directly
+    (`app.py`, a JSON export, evaluation output) emits results with no disclaimer. Only the
+    explainer path is covered. This is squarely non-negotiable rule 5, and `schemas.py` is the
+    shared contract — team agreement, not a unilateral edit.
+  - `explainer.llm_explain()` returns model output unvalidated: no post-hoc check that gene names in
+    the generated text actually appear in `pred.supporting_features`. Prompt rules alone cannot
+    prevent hallucinated biology. Owner: Hazem.
+  - Meropenem has no target genes, so it is never gated (`target_gate_status="unknown"`). Synthetic
+    drug only, so it does not touch the real-data results. Owner: Moncef.
 - **AMRFinderPlus is not installed in this environment** and Docker's daemon is not running. The
   119-genome matrix came from Moncef's machine. Anyone scaling the dataset needs the toolchain
   working locally first — validate on ~5 genomes before committing to a full run.
