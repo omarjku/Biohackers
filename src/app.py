@@ -1,5 +1,16 @@
+import os
+
 import streamlit as st
 import pandas as pd
+
+# Load OPENAI_API_KEY (and anything else) from a local .env if present, so the
+# documented `cp .env.example .env` workflow actually reaches the process. No-op
+# if python-dotenv or the file is missing; the GPT path just stays off.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # =====================================================================
 # 0. BACKEND IMPORTS
@@ -135,7 +146,6 @@ uploaded_fasta = st.file_uploader("Upload Reconstructed Bacterial Genome (FASTA)
 # Optional bundled example genomes (present only when data/raw/fasta_demo has been
 # populated locally) so the demo can run offline without hunting for a FASTA.
 import glob
-import os
 
 _example_dir = os.path.join(os.path.dirname(__file__), "..", "data", "raw", "fasta_demo")
 _examples = sorted(glob.glob(os.path.join(_example_dir, "*.fna")))
@@ -146,6 +156,25 @@ if _examples:
         _sel = st.selectbox("Example genome (real BV-BRC assembly)", _names)
         if _sel != "—":
             example_choice = os.path.join(_example_dir, _sel)
+
+# GPT explanation toggle. Off by default: the deterministic template path ships by
+# default and needs no API key. When on, the explainer refines each card's
+# biological/statistical text with gpt-4o-mini (~3 cheap calls per genome, one per
+# drug) and falls back to the template on any failure — so this can never break a
+# demo, only enrich it.
+_key = os.environ.get("OPENAI_API_KEY", "")
+_has_key = _key.startswith("sk-") and _key != "sk-your-key-here"
+use_gpt = st.toggle(
+    "Use GPT clinician-readable explanations (OpenAI)",
+    value=False,
+    help="Off = deterministic template explanations (no API key needed). "
+         "On = gpt-4o-mini refines each explanation; needs OPENAI_API_KEY in .env.",
+)
+if use_gpt and not _has_key:
+    st.warning(
+        "No valid `OPENAI_API_KEY` found — add your key to `.env` "
+        "(`cp .env.example .env`) and rerun. Falling back to template explanations."
+    )
 
 fasta_source = uploaded_fasta if uploaded_fasta is not None else example_choice
 source_name = (uploaded_fasta.name if uploaded_fasta is not None
@@ -183,7 +212,7 @@ if fasta_source is not None:
     # separate biological vs statistical explanations. The calibrated no-call
     # gate (OOD + ambiguous band) already ran in calibration.py — the UI does
     # NOT apply a second threshold on top of it.
-    reports = explainer.explain_report(raw_predictions, use_llm=False)
+    reports = explainer.explain_report(raw_predictions, use_llm=use_gpt)
 
     STATE_STYLE = {
         "Likely to work": ("badge-work", "fill-work"),
