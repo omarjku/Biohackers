@@ -159,16 +159,19 @@ with st.expander("System Scope & Generalization Metrics", expanded=False):
     with col_scope:
         st.markdown("**System Scope Declaration**")
         st.markdown("""
-        * **Pathogens:** *Mycobacterium tuberculosis*, *Staphylococcus aureus*, *Klebsiella pneumoniae*.
-        * **Out of Scope:** Gram-negative non-fermenters, fungal pathogens, viral assemblies.
+        * **Species:** *Escherichia coli* (single-species prototype).
+        * **Antibiotics:** Ampicillin, Ciprofloxacin, Trimethoprim.
+        * **Out of Scope:** other species, other antibiotics, sample-to-genome
+          processing, and any organism design or modification.
         """)
     with col_metrics:
-        st.markdown("**Generalization Performance (Clade-Split Results)**")
-        st.caption("Offline evaluation calculated on independent lineages to confirm functional biological learning.")
+        st.markdown("**Generalization Performance (MLST-Split Results)**")
+        st.caption("Offline evaluation over 8 grouped splits by MLST lineage (2,127 genomes) — held-out groups, no near-identical leakage.")
         metrics_data = {
-            "Lineage Group": ["M.tb Euro-American", "M.tb East-Asian", "K.peneu ST258 Clade A"],
-            "F1 Score": ["0.94", "0.91", "0.89"],
-            "PR-AUC": ["0.96", "0.95", "0.92"]
+            "Antibiotic": ["Ampicillin", "Ciprofloxacin", "Trimethoprim"],
+            "Balanced Acc": ["0.93", "0.85", "0.92"],
+            "AUROC": ["0.95", "0.91", "0.94"],
+            "Coverage": ["91%", "84%", "85%"],
         }
         st.dataframe(pd.DataFrame(metrics_data), hide_index=True, use_container_width=True)
 st.divider()
@@ -178,104 +181,85 @@ st.divider()
 # =====================================================================
 uploaded_fasta = st.file_uploader("Upload Reconstructed Bacterial Genome (FASTA)", type=["fasta", "fa"])
 
-if uploaded_fasta is not None:
+# Optional bundled example genomes (present only when data/raw/fasta_demo has been
+# populated locally) so the demo can run offline without hunting for a FASTA.
+import glob
+import os
+
+_example_dir = os.path.join(os.path.dirname(__file__), "..", "data", "raw", "fasta_demo")
+_examples = sorted(glob.glob(os.path.join(_example_dir, "*.fna")))
+example_choice = None
+if _examples:
+    with st.expander("…or run a bundled example E. coli genome"):
+        _names = ["—"] + [os.path.basename(e) for e in _examples]
+        _sel = st.selectbox("Example genome (real BV-BRC assembly)", _names)
+        if _sel != "—":
+            example_choice = os.path.join(_example_dir, _sel)
+
+fasta_source = uploaded_fasta if uploaded_fasta is not None else example_choice
+source_name = (uploaded_fasta.name if uploaded_fasta is not None
+               else (os.path.basename(example_choice) if example_choice else None))
+
+if fasta_source is not None:
     with st.status("Executing Genome Firewall Pipeline...", expanded=True) as status:
-        st.write("Module 01: Extracting genomic features...")
-        time.sleep(0.3)
-        st.write("Module 02: Evaluating predictor schemas...")
-        raw_predictions = pipeline.run(uploaded_fasta)
-        time.sleep(0.3)
-        st.write("Module 03: Explainer NL Layer resolving text...")
-        time.sleep(0.3)
+        st.write("Module 01: Annotating genome with AMRFinderPlus...")
+        st.write("Module 02: Scoring per-antibiotic models + Platt calibration...")
+        raw_predictions = pipeline.run(fasta_source)
+        st.write("Module 03: Explainer NL layer resolving evidence...")
         status.update(label="Analysis Complete", state="complete", expanded=False)
 
     st.markdown(f"""
         <div class="qc-bar">
-            <div class="qc-metric"><span class="qc-label">Target File</span><span class="qc-value">{uploaded_fasta.name}</span></div>
+            <div class="qc-metric"><span class="qc-label">Target File</span><span class="qc-value">{source_name}</span></div>
             <div class="qc-metric"><span class="qc-label">Integration Status</span><span class="qc-value" style="color: {'#15803d' if PIPELINE_CONNECTED else '#b45309'};">{'CONNECTED' if PIPELINE_CONNECTED else 'MOCK ISOLATION'}</span></div>
             <div class="qc-metric"><span class="qc-label">Compounds Evaluated</span><span class="qc-value">{len(raw_predictions)}</span></div>
         </div>
     """, unsafe_allow_html=True)
 
-    ui_cards = []
+    # -------------------------------------------------------------
+    # NEW-JSON REPORT MAPPING + DECISION-THRESHOLD INTERCEPT
+    # -------------------------------------------------------------
+    # explain_report() returns the frontend contract: underlying_state,
+    # confidence-in-the-call, target_marker, locus_id, drug_class, and the
+    # separate biological vs statistical explanations.
+    reports = explainer.explain_report(raw_predictions, use_llm=False)
 
-    # -------------------------------------------------------------
-    # SCHEMAS.PY DATA MAPPING & CALIBRATION INTERCEPT
-    # -------------------------------------------------------------
-    evidence_map = {
-        "known_gene_or_mutation": "Type (i): Known Gene/Mutation",
-        "statistical_association": "Type (ii): Statistical Association",
-        "no_known_signal": "Type (iii): No Known Signal Found"
+    STATE_STYLE = {
+        "Likely to work": ("badge-work", "fill-work"),
+        "Likely to fail": ("badge-fail", "fill-fail"),
+        "No-call": ("badge-nocall", "fill-nocall"),
     }
 
-    for pred in raw_predictions:
-        # 1. Apply UI Slider Calibration
-        conf_pct = pred.confidence * 100
+    ui_cards = []
+    for rep in reports:
+        state = rep["underlying_state"]
+        conf_pct = rep["confidence"] * 100
+        stat_text = rep["stat_explanation"]
 
-        # 'not_applicable' is an absolute state; never override it.
-        if pred.call != "not_applicable":
-            if conf_pct < decision_threshold and pred.call != "no_call":
-                pred.call = "no_call"
-                pred.no_call_reason = f"Confidence ({conf_pct:.1f}%) fell below user safety threshold ({decision_threshold}%)."
+        # Decision-threshold slider: abstain when certainty in a definite call
+        # falls below the user's chosen threshold.
+        if state in ("Likely to work", "Likely to fail") and conf_pct < decision_threshold:
+            state = "No-call"
+            stat_text = (f"Model certainty {conf_pct:.1f}% is below the decision "
+                         f"threshold ({decision_threshold:.0f}%); withheld as a No-call.")
 
-        # 2. Fetch Natural Language Explanation
-        explanation = explainer.explain(pred)
+        badge, fill = STATE_STYLE.get(state, ("badge-nocall", "fill-nocall"))
+        ui_cards.append({
+            "drug": rep["drug"],
+            "drug_class": rep["drug_class"],
+            "confidence": rep["confidence"],
+            "call_status": state,
+            "target_marker": rep["target_marker"],
+            "locus": rep["locus_id"],
+            "bio_explanation": rep["bio_explanation"],
+            "stat_explanation": stat_text,
+            "disclaimer": explainer.DISCLAIMER,
+            "badge": badge, "fill": fill, "label": state,
+        })
 
-        # 3. Extract Schema Features for Target Boxes
-        locus = "Unknown"
-        target_marker = "Unknown"
-
-        if pred.call == "not_applicable":
-            locus = "Target Locus Missing"
-            target_marker = "N/A"
-        elif pred.supporting_features:
-            feat = pred.supporting_features[0]
-            locus = feat.gene
-            target_marker = feat.mutation if feat.mutation else "Present (No specific mutation noted)"
-        elif pred.call == "likely_to_work":
-            locus = "Target Present"
-            target_marker = "Wild-Type Validated"
-
-        # 4. UI Display Payload
-        card = {
-            "drug": pred.drug,
-            "confidence": pred.confidence,
-            "call_status": pred.call,
-            "target_marker": target_marker,
-            "locus": locus,
-            "evidence_str": evidence_map.get(pred.evidence_category, "Unknown Evidence Structure"),
-            "explanation_text": explanation.explanation_text,
-            "disclaimer": explanation.disclaimer
-        }
-
-        # 5. CSS Class Assignment
-        if card["call_status"] == "likely_to_work":
-            card['badge'], card['fill'], card['label'] = "badge-work", "fill-work", "Likely to work"
-        elif card["call_status"] == "likely_to_fail":
-            card['badge'], card['fill'], card['label'] = "badge-fail", "fill-fail", "Likely to fail"
-        elif card["call_status"] == "not_applicable":
-            card['badge'], card['fill'], card['label'] = "badge-na", "fill-na", "Not Applicable"
-        else:
-            card['badge'], card['fill'], card['label'] = "badge-nocall", "fill-nocall", "No-call"
-
-        ui_cards.append(card)
-
-
-    # -------------------------------------------------------------
-    # DYNAMIC SORTING (PRIORITIZE LIKELY TO WORK -> N/A LAST)
-    # -------------------------------------------------------------
-    def sort_cards(c):
-        if c['call_status'] == "likely_to_work":
-            return 0
-        elif c['call_status'] == "likely_to_fail":
-            return 1
-        elif c['call_status'] == "no_call":
-            return 2
-        else:
-            return 3  # not_applicable
-
-
-    sorted_cards = sorted(ui_cards, key=sort_cards)
+    # Sort: workable first, then fail, then no-call.
+    ORDER = {"Likely to work": 0, "Likely to fail": 1, "No-call": 2}
+    sorted_cards = sorted(ui_cards, key=lambda c: ORDER.get(c["call_status"], 3))
 
     # -------------------------------------------------------------
     # RENDER GRID
@@ -290,7 +274,10 @@ if uploaded_fasta is not None:
                     with st.container(border=True):
                         st.markdown(f"""
                             <div class="card-header">
-                                <h3 class="drug-name">{card['drug']}</h3>
+                                <div>
+                                    <h3 class="drug-name">{card['drug']}</h3>
+                                    <div style="font-size:0.8rem;color:#6b7280;font-weight:500;">{card['drug_class']}</div>
+                                </div>
                                 <div class="badge {card['badge']}">{card['label']}</div>
                             </div>
 
@@ -305,13 +292,9 @@ if uploaded_fasta is not None:
 
                         with st.expander("Evidence & Biological Rationale"):
                             st.markdown(f"""
-                                <div class="reasoning-row">
-                                    <span class="reasoning-label">Evidence Framework:</span>
-                                    <span class="reasoning-value">{card['evidence_str']}</span>
-                                </div>
                                 <div class="target-box">
                                     <div class="target-col">
-                                        <span class="target-title">Target/Mutation</span>
+                                        <span class="target-title">Target / Marker</span>
                                         <span class="target-value">{card['target_marker']}</span>
                                     </div>
                                     <div class="target-col">
@@ -322,9 +305,14 @@ if uploaded_fasta is not None:
                             """, unsafe_allow_html=True)
 
                             st.markdown(
-                                "<span style='font-size: 0.75rem; color: #9ca3af; font-family: Courier; text-transform: uppercase; font-weight:600;'>AI Rationale (NL Layer)</span>",
+                                "<span style='font-size: 0.75rem; color: #9ca3af; font-family: Courier; text-transform: uppercase; font-weight:600;'>Biological Rationale</span>",
                                 unsafe_allow_html=True)
-                            st.write(card['explanation_text'])
+                            st.write(card['bio_explanation'])
+
+                            st.markdown(
+                                "<span style='font-size: 0.75rem; color: #9ca3af; font-family: Courier; text-transform: uppercase; font-weight:600;'>Statistical Rationale</span>",
+                                unsafe_allow_html=True)
+                            st.write(card['stat_explanation'])
 
                             st.markdown(
                                 "<br><span style='font-size: 0.75rem; color: #9ca3af; font-family: Courier; text-transform: uppercase; font-weight:600;'>Mandatory Disclaimer</span>",

@@ -137,6 +137,198 @@ def explain(pred: Prediction, use_llm: bool = True) -> ExplanationResult:
     )
 
 
+# --- 4. Frontend report JSON (Module 03 contract with the Streamlit app) --------
+#
+# The app consumes a list of these objects (see data/synthetic/sample_predictions
+# JSON spec). Shape and the EXACT capitalised state strings are fixed by the
+# frontend; do not change them without the UI owner.
+
+DRUG_CLASS = {
+    "Ampicillin": "Beta-lactam (aminopenicillin)",
+    "Ciprofloxacin": "Fluoroquinolone",
+    "Trimethoprim": "Folate-pathway antagonist (DHFR inhibitor)",
+}
+
+# The molecular target locus the drug acts on — populates the genetic tracking box.
+DRUG_LOCUS = {
+    "Ampicillin": "ftsI",
+    "Ciprofloxacin": "gyrA",
+    "Trimethoprim": "folA",
+}
+
+# call -> the exact string the frontend expects (capitalisation matters).
+STATE_LABEL = {
+    "likely_to_fail": "Likely to fail",
+    "likely_to_work": "Likely to work",
+    "no_call": "No-call",
+    "not_applicable": "No-call",  # 3-state UI; target absence is explained in text
+}
+
+
+def _gene_names(pred: Prediction) -> str:
+    """Comma-joined gene (+mutation) names only — no notes, for clean prose."""
+    if not pred.supporting_features:
+        return "no supporting genomic features"
+    return ", ".join(
+        f.gene + (f" {f.mutation}" if f.mutation else "") for f in pred.supporting_features
+    )
+
+
+def _state_confidence(pred: Prediction) -> float:
+    """
+    Confidence IN THE REPORTED STATE, as a raw 0-1 float.
+
+    pred.confidence is the calibrated P(resistant). For a "likely to work" call
+    the number the user should see is the susceptibility confidence, 1 - P(R)
+    (matching the frontend's 0.942 "Likely to work" example). For no-call we show
+    the raw probability so the ambiguity is visible.
+    """
+    if pred.call == "likely_to_work":
+        return round(1.0 - pred.confidence, 3)
+    return round(pred.confidence, 3)
+
+
+def _markers(pred: Prediction) -> tuple[str, str]:
+    """(target_marker, locus_id) for the genetic tracking boxes."""
+    locus = DRUG_LOCUS.get(pred.drug, "N/A")
+    if pred.call == "not_applicable":
+        return "N/A", locus
+    if pred.call == "no_call":
+        return "Ambiguous", locus
+    if pred.supporting_features:
+        genes = [f.gene + (f" {f.mutation}" if f.mutation else "") for f in pred.supporting_features]
+        return "; ".join(genes[:3]), locus
+    return "Wild-Type", locus
+
+
+def _bio_stat_text(pred: Prediction) -> tuple[str, str]:
+    """
+    (bio_explanation, stat_explanation) — the honest split the brief requires:
+    a KNOWN causal mechanism is described only when the evidence is a known gene;
+    a statistical association is labelled as a learned pattern, never as proof.
+    Only genes already in supporting_features are named (no hallucinated biology).
+    """
+    drug = pred.drug
+    klass = DRUG_CLASS.get(drug, "this antibiotic class")
+    locus = DRUG_LOCUS.get(drug, "the drug target")
+    feats = _gene_names(pred)
+    conf = pred.confidence
+
+    if pred.call == "not_applicable":
+        return (
+            f"The molecular target for {drug} ({locus}) was not detected in this "
+            "genome, so susceptibility cannot be assessed from sequence.",
+            "No probability is reported: the deterministic target gate overrides "
+            "the statistical model when the drug has no target to act on.",
+        )
+
+    if pred.call == "no_call":
+        reason = pred.no_call_reason or "the evidence is weak or conflicting"
+        return (
+            f"Evidence for {drug} is inconclusive, so no confident biological "
+            f"interpretation is made. {reason}",
+            f"The calibrated resistance probability ({conf:.0%}) does not clear the "
+            "no-call margin, or the genome is unlike the training data — a safe "
+            "prediction cannot be computed.",
+        )
+
+    if pred.call == "likely_to_fail":
+        if pred.evidence_category == "known_gene_or_mutation":
+            return (
+                f"Detected a known {klass} resistance determinant: {feats}. This is "
+                "an established mechanism, so the drug is predicted to fail.",
+                f"The calibrated model assigns {conf:.0%} probability of resistance, "
+                "consistent with the detected determinant.",
+            )
+        return (
+            f"No confirmed causal resistance mutation at the {locus} target was "
+            "detected; the prediction does not rest on a proven mechanism.",
+            f"The model links {feats} to resistance as a learned statistical "
+            f"pattern (association, not proven cause); calibrated probability {conf:.0%}.",
+        )
+
+    # likely_to_work
+    if pred.evidence_category == "no_known_signal":
+        return (
+            f"No known {klass} resistance genes or mutations were found, and the "
+            f"drug target ({locus}) appears intact (wild-type).",
+            f"Calibrated susceptibility confidence is {1 - conf:.0%}; the genomic "
+            "profile sits within the susceptible range seen in training.",
+        )
+    return (
+        f"Although {feats} was noted, the model still predicts {drug} works; "
+        "interpret with caution and confirm by lab testing.",
+        f"Calibrated resistance probability is low ({conf:.0%}) despite the noted "
+        "feature(s).",
+    )
+
+
+def report_item(pred: Prediction, use_llm: bool = False) -> dict:
+    """One antibiotic -> the frontend JSON object (see the app's JSON spec)."""
+    bio, stat = _bio_stat_text(pred)
+    if use_llm and os.environ.get("OPENAI_API_KEY"):
+        bio, stat = _llm_refine_report(pred, bio, stat)
+    marker, locus = _markers(pred)
+    return {
+        "drug": pred.drug,
+        "drug_class": DRUG_CLASS.get(pred.drug, "Unknown"),
+        "underlying_state": STATE_LABEL[pred.call],
+        "confidence": _state_confidence(pred),
+        "target_marker": marker,
+        "locus_id": locus,
+        "bio_explanation": bio,
+        "stat_explanation": stat,
+    }
+
+
+def explain_report(preds: list[Prediction], use_llm: bool = False) -> list[dict]:
+    """Full per-genome report array for the frontend."""
+    return [report_item(p, use_llm=use_llm) for p in preds]
+
+
+def _llm_refine_report(pred: Prediction, bio: str, stat: str) -> tuple[str, str]:
+    """Optional GPT polish. Same honesty guardrails as llm_explain; falls back."""
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        system = (
+            "You refine two short antibiotic-resistance explanation strings for a "
+            "clinician. Rules: only restate facts in the input, never invent genes "
+            "or mutations; keep the biological vs statistical distinction; never "
+            "state a treatment decision; one or two sentences each. Return exactly "
+            "two lines: 'BIO: ...' then 'STAT: ...'."
+        )
+        user = f"Structured result: {pred.model_dump_json()}\nBIO draft: {bio}\nSTAT draft: {stat}"
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            temperature=0.2,
+            max_tokens=220,
+        )
+        out = resp.choices[0].message.content.strip().splitlines()
+        new_bio = next((l[4:].strip() for l in out if l.upper().startswith("BIO:")), bio)
+        new_stat = next((l[5:].strip() for l in out if l.upper().startswith("STAT:")), stat)
+        # honesty guard: reject a refinement that names a gene not in the input
+        if _contains_unlisted_gene(pred, new_bio + " " + new_stat):
+            return bio, stat
+        return new_bio, new_stat
+    except Exception:  # noqa: BLE001
+        return bio, stat
+
+
+def _contains_unlisted_gene(pred: Prediction, text: str) -> bool:
+    """True if text mentions a gene-looking token absent from supporting_features."""
+    import re
+
+    allowed = {f.gene.lower() for f in pred.supporting_features}
+    allowed |= {DRUG_LOCUS.get(pred.drug, "").lower()}
+    for tok in re.findall(r"\b(?:bla[A-Za-z0-9-]+|[a-z]{2,4}A\d*|gyrA|parC|sul\d|dfrA\d*)\b", text):
+        if tok.lower() not in allowed and not any(tok.lower() in a for a in allowed):
+            return True
+    return False
+
+
 if __name__ == "__main__":
     # Quick manual test against the synthetic fixtures — run this file directly:
     #   python src/explainer.py
