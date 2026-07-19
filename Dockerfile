@@ -40,6 +40,9 @@ WORKDIR /app
 COPY --chown=$MAMBA_USER:$MAMBA_USER . /app
 
 EXPOSE 8501
+# CORS/XSRF are disabled so the app also works when embedded in an iframe or
+# reverse-proxied (Hugging Face Spaces, a cloudflared tunnel). Harmless locally.
 CMD ["streamlit", "run", "src/app.py", \
      "--server.port=8501", "--server.address=0.0.0.0", \
-     "--server.headless=true"]
+     "--server.headless=true", \
+     "--server.enableCORS=false", "--server.enableXsrfProtection=false"]
