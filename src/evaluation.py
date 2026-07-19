@@ -53,6 +53,24 @@ BANNER = (
     "Not a benchmark."
 )
 
+REAL_DATA_BANNER = (
+    "REAL DATA (E. coli, BV-BRC) — research prototype. "
+    "All results must be confirmed with standard laboratory testing."
+)
+
+
+def banner_for(data_dir: Path) -> str:
+    """
+    Pick the provenance banner from the data actually loaded.
+
+    This was a single hardcoded SYNTHETIC constant, stamped onto every figure and
+    printed at the top of every run. The first real-data run therefore produced a
+    dashboard labelled SYNTHETIC — a mislabelled plot is the one output that
+    survives into a slide deck without its context, so provenance is derived
+    here, never assumed.
+    """
+    return BANNER if "synthetic" in Path(data_dir).name.lower() else REAL_DATA_BANNER
+
 
 @dataclass
 class DrugEvaluation:
@@ -82,6 +100,24 @@ def _safe(fn, *args, **kwargs) -> float:
         return float(fn(*args, **kwargs))
     except ValueError:
         return float("nan")
+
+
+def _decision_metrics_defined(y_true_answered: np.ndarray) -> bool:
+    """
+    Are per-class decision metrics meaningful on the rows we actually answered?
+
+    Only when both classes survive the no-call gate. sklearn does NOT raise on a
+    single-class y_true — balanced_accuracy_score quietly degrades to plain
+    accuracy, and recall for the absent class returns 0 via zero_division. That
+    combination produced a genuinely misleading row: ampicillin answers only
+    genomes that are truly resistant, so it reported bal_acc 0.917 alongside
+    recall_R 1.000 and recall_S 0.000 — three numbers that cannot all be true.
+    The 0.917 was accuracy on a single class wearing balanced accuracy's name.
+
+    Suppressing to NaN makes the gap visible: coverage still reports, and the
+    seed count in multi_seed_metrics shows how often a drug was scoreable at all.
+    """
+    return len(np.unique(y_true_answered)) >= 2
 
 
 # --------------------------------------------------------------------------
@@ -132,6 +168,11 @@ def metrics_table(evaluations: list[DrugEvaluation]) -> pd.DataFrame:
         yt_all, yp_all = ev.y_true, ev.y_prob
         yt, yp = ev.y_true[mask], ev.y_pred[mask]
 
+        # Decision metrics are only defined when both classes survive the no-call
+        # gate; otherwise they are NaN rather than a flattering artefact.
+        nan = float("nan")
+        defined = _decision_metrics_defined(yt)
+
         rows.append(
             {
                 "drug": ev.drug,
@@ -139,10 +180,11 @@ def metrics_table(evaluations: list[DrugEvaluation]) -> pd.DataFrame:
                 "pct_R": round(100 * float(yt_all.mean()), 1),
                 # --- decision metrics, answered rows only ---
                 "coverage": round(100 * float(mask.mean()), 1),
-                "bal_acc": round(_safe(balanced_accuracy_score, yt, yp), 3),
-                "recall_R": round(_safe(recall_score, yt, yp, pos_label=1, zero_division=0), 3),
-                "recall_S": round(_safe(recall_score, yt, yp, pos_label=0, zero_division=0), 3),
-                "f1_R": round(_safe(f1_score, yt, yp, pos_label=1, zero_division=0), 3),
+                "n_answered": int(mask.sum()),
+                "bal_acc": round(_safe(balanced_accuracy_score, yt, yp), 3) if defined else nan,
+                "recall_R": round(_safe(recall_score, yt, yp, pos_label=1, zero_division=0), 3) if defined else nan,
+                "recall_S": round(_safe(recall_score, yt, yp, pos_label=0, zero_division=0), 3) if defined else nan,
+                "f1_R": round(_safe(f1_score, yt, yp, pos_label=1, zero_division=0), 3) if defined else nan,
                 # --- probabilistic metrics, all rows ---
                 "auroc": round(_safe(roc_auc_score, yt_all, yp_all), 3),
                 "pr_auc": round(_safe(average_precision_score, yt_all, yp_all), 3),
@@ -155,6 +197,69 @@ def metrics_table(evaluations: list[DrugEvaluation]) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+#: Metrics worth averaging across seeds. Counts (n_test) are reported separately.
+_SEED_METRICS = (
+    "coverage", "bal_acc", "recall_R", "recall_S", "f1_R",
+    "auroc", "pr_auc", "brier_raw", "brier_cal", "no_call",
+)
+
+
+def multi_seed_metrics(
+    dataset: Dataset, seeds: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6, 7)
+) -> pd.DataFrame:
+    """
+    Per-drug metrics as mean ± sd over several grouped splits.
+
+    A single split is not a result at this sample size. On the real E. coli data
+    each drug's test slice is 9-11 genomes and only a fraction of those get
+    answered, so seed 0 alone reported bal_acc = 1.000 for ampicillin off TWO
+    answered rows. Re-drawing the split moves that number between 0.5 and 1.0.
+    Reporting the mean and spread over seeds is the difference between a metric
+    and an anecdote.
+
+    `n_seeds` counts the seeds that actually produced a scoreable value for that
+    metric — a seed whose test slice came back single-class, or where the model
+    answered nothing, contributes nothing and is not silently averaged as zero.
+    Read a low n_seeds as a warning about the metric, not a detail.
+    """
+    per_seed = []
+    for seed in seeds:
+        predictor = Predictor.fit(dataset, seed=seed)
+        calibrator = Calibrator.fit(dataset, predictor)
+        evaluations = [
+            evaluate_drug(dataset, predictor, calibrator, drug)
+            for drug in predictor.models
+        ]
+        table = metrics_table(evaluations)
+        table["seed"] = seed
+        per_seed.append(table)
+
+    stacked = pd.concat(per_seed, ignore_index=True)
+
+    rows = []
+    for drug, group in stacked.groupby("drug", sort=False):
+        row = {
+            "drug": drug,
+            "n_test": int(round(group["n_test"].mean())),
+            "seeds": len(group),
+        }
+        for metric in _SEED_METRICS:
+            values = group[metric].dropna()
+            row[metric] = (
+                f"{values.mean():.3f}±{values.std(ddof=0):.3f}" if len(values) else "n/a"
+            )
+            row[f"{metric}_n"] = len(values)
+        rows.append(row)
+
+    table = pd.DataFrame(rows)
+    # Keep the per-metric seed counts out of the default view unless they differ
+    # from the full set — then they matter and should be impossible to miss.
+    count_cols = [f"{m}_n" for m in _SEED_METRICS]
+    if (table[count_cols] == len(seeds)).all().all():
+        table = table.drop(columns=count_cols)
+    return table
 
 
 def per_cluster_table(ev: DrugEvaluation, min_size: int = 3) -> pd.DataFrame:
@@ -301,6 +406,7 @@ def plot_dashboard(
     table: pd.DataFrame,
     comparison: pd.DataFrame | None,
     out_path: Path,
+    banner: str = BANNER,
 ) -> Path:
     """Four-panel summary figure: calibration, decisions, coverage, leakage."""
     import matplotlib
@@ -393,7 +499,7 @@ def plot_dashboard(
     else:
         ax.axis("off")
 
-    fig.text(0.5, 0.005, BANNER, ha="center", fontsize=10,
+    fig.text(0.5, 0.005, banner, ha="center", fontsize=10,
              color="#b00020", fontweight="bold")
     fig.tight_layout(rect=[0, 0.02, 1, 0.97])
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -416,7 +522,8 @@ def run_full_evaluation(
     print("=" * 78)
     print("Genome Firewall — pipeline evaluation")
     print("=" * 78)
-    print(f"\n!! {BANNER}\n")
+    banner = banner_for(data_dir)
+    print(f"\n!! {banner}\n")
 
     ds = load_dataset(data_dir)
     print(f"{len(ds.features)} genomes, {len(ds.feature_names)} features, "
@@ -431,7 +538,15 @@ def run_full_evaluation(
     ]
 
     table = metrics_table(evaluations)
-    print("\nPer-drug metrics (test slice of the grouped split)")
+
+    # The headline table. Reported before the seed-0 detail deliberately: the
+    # single-split numbers below are one draw from the distribution summarised
+    # here, and quoting them on their own overstates what this data supports.
+    seed_table = multi_seed_metrics(ds, seeds=seeds)
+    print(f"\nPer-drug metrics — mean±sd over {len(seeds)} grouped splits  [REPORT THESE]")
+    print(seed_table.to_string(index=False))
+
+    print("\nSeed 0 detail (one draw — for the dashboard plots, not for quoting)")
     print(table.to_string(index=False))
 
     print("\nPer-cluster breakdown — is performance uniform across lineages?")
@@ -449,13 +564,14 @@ def run_full_evaluation(
     print(comparison.to_string(index=False))
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = plot_dashboard(evaluations, table, comparison, out_dir / "evaluation.png")
+    path = plot_dashboard(evaluations, table, comparison, out_dir / "evaluation.png", banner)
     print(f"\nDashboard written to {path}")
 
-    table.to_csv(out_dir / "metrics.csv", index=False)
+    table.to_csv(out_dir / "metrics_seed0.csv", index=False)
+    seed_table.to_csv(out_dir / "metrics.csv", index=False)
     comparison.to_csv(out_dir / "leakage_comparison.csv", index=False)
-    print(f"Tables written to {out_dir / 'metrics.csv'} and "
-          f"{out_dir / 'leakage_comparison.csv'}")
+    print(f"Tables written to {out_dir / 'metrics.csv'} (multi-seed), "
+          f"{out_dir / 'metrics_seed0.csv'} and {out_dir / 'leakage_comparison.csv'}")
 
 
 if __name__ == "__main__":

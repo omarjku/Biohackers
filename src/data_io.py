@@ -78,9 +78,18 @@ def load_dataset(data_dir: str | Path) -> Dataset:
     """Load and validate the four contract files from a directory."""
     data_dir = Path(data_dir)
 
-    features = pd.read_csv(data_dir / "features.csv", index_col="genome_id")
-    labels = pd.read_csv(data_dir / "labels.csv")
-    genomes = pd.read_csv(data_dir / "genomes.csv", index_col="genome_id")
+    # genome_id is ALWAYS a string, never inferred. BV-BRC ids look numeric
+    # ("562.100145"), so pandas types the column float64 and silently drops
+    # trailing zeros: "562.65180" becomes 562.6518 and no longer matches its own
+    # label row. 228 of the 2,154 ids in data/genome_id_list.csv (10.6%) are
+    # affected. Synthetic fixtures use "GEN-0001" and never exposed this.
+    features = pd.read_csv(
+        data_dir / "features.csv", index_col="genome_id", dtype={"genome_id": str}
+    )
+    labels = pd.read_csv(data_dir / "labels.csv", dtype={"genome_id": str})
+    genomes = pd.read_csv(
+        data_dir / "genomes.csv", index_col="genome_id", dtype={"genome_id": str}
+    )
 
     targets_path = data_dir / "drug_targets.json"
     drug_targets = json.loads(targets_path.read_text()) if targets_path.exists() else {}

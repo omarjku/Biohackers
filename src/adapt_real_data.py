@@ -134,7 +134,16 @@ def build_drug_targets(drugs: list[str]) -> dict[str, dict]:
 def adapt(raw_dir: Path = RAW_DIR, out_dir: Path = OUT_DIR) -> dict[str, Path]:
     csvs = _read_zip_csvs(raw_dir / "files.zip")
     feature_matrix = csvs["feature_matrix_real"]
-    clusters = pd.read_csv(raw_dir / "genome_clusters.csv")
+
+    # Prefer clusters computed from the FASTA sequences (splits.cluster_genomes at
+    # DEFAULT_MASH_THRESHOLD). The shipped genome_clusters.csv carries real but
+    # very coarse structure — 3 groups of 58/60/1, roughly phylogroup-level — and
+    # does not reproduce from Mash single-linkage at any threshold. Two usable
+    # groups cannot fill three splits, so sequence-derived clusters win when present.
+    mash_clusters = raw_dir / "genome_clusters_mash.csv"
+    clusters = pd.read_csv(
+        mash_clusters if mash_clusters.exists() else raw_dir / "genome_clusters.csv"
+    )
     labels_sampled = pd.read_csv(
         REPO_ROOT / "data" / "labels_sampled.csv", encoding="utf-8-sig"
     )

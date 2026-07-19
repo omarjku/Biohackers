@@ -44,7 +44,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
 from data_io import Dataset
-from predictor import Predictor
+from predictor import DEFAULT_C, Predictor, fit_drug_model
 from schemas import Prediction
 
 # Ambiguous band. Inside this range the model is not committing to an answer, so
@@ -59,6 +59,13 @@ NO_CALL_HIGH = 0.70
 # 99 rather than 100: a single weird training genome should not stretch the
 # envelope wide enough to wave everything through.
 OOD_PERCENTILE = 99.0
+
+# Below this many held-out calibration rows, Platt is augmented with out-of-fold
+# training predictions (see Calibrator.fit). Two free parameters fitted on fewer
+# rows than this are variance-dominated: the real E. coli slices are 7-8 rows and
+# collapsed onto their own base rate, while the synthetic slices at 61-77 rows
+# were stable and measurably preferred the un-augmented fit.
+MIN_CALIBRATION_ROWS = 40
 
 # Probabilities are clipped before the logit transform so a saturated 0.0/1.0
 # does not produce an infinite feature for the Platt fit.
@@ -148,6 +155,62 @@ def _ood_threshold(train_profiles: np.ndarray, calibration_profiles: np.ndarray)
 # --------------------------------------------------------------------------
 
 
+def _oof_probabilities(
+    dataset: Dataset,
+    drug: str,
+    train_rows: np.ndarray,
+    groups: np.ndarray,
+    predictor: Predictor,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Out-of-fold raw probabilities for the training rows.
+
+    Splits the training rows into GROUPED folds — folds are cut on cluster_id, so
+    a genome is never scored by a model that trained on its own cluster. Using
+    plain KFold here would reintroduce exactly the leakage grouped splitting
+    exists to prevent, one level down, and would produce over-confident
+    probabilities that calibrate to an over-confident sigmoid.
+
+    Returns (raw_probabilities, y) for rows that were successfully scored. Folds
+    whose training half is single-class are skipped rather than guessed at.
+    """
+    from sklearn.model_selection import GroupKFold
+
+    train_rows = np.asarray(train_rows)
+    X, y, _ = dataset.xy_for_drug(drug)
+    y_train = np.asarray(y)[train_rows]
+    g_train = np.asarray(groups)[train_rows]
+
+    n_splits = min(5, len(np.unique(g_train)))
+    if n_splits < 2:
+        return np.array([]), np.array([])
+
+    C = getattr(predictor, "C", DEFAULT_C)
+    weight_by_cluster = getattr(predictor, "weight_by_cluster", True)
+
+    raws: list[float] = []
+    ys: list[int] = []
+    for inner_train, inner_test in GroupKFold(n_splits=n_splits).split(
+        np.zeros(len(train_rows)), y_train, g_train
+    ):
+        if len(np.unique(y_train[inner_train])) < 2:
+            continue
+        fold_model = fit_drug_model(
+            dataset,
+            drug,
+            train_rows[inner_train],
+            groups,
+            C=C,
+            weight_by_cluster=weight_by_cluster,
+        )
+        for pos in inner_test:
+            row = X.iloc[train_rows[pos]]
+            raws.append(fold_model.probability_resistant(row))
+            ys.append(int(y_train[pos]))
+
+    return np.array(raws), np.array(ys)
+
+
 @dataclass
 class Calibrator:
     """All per-antibiotic calibrators, fitted against a Predictor's own splits."""
@@ -172,24 +235,53 @@ class Calibrator:
                     "is no held-out slice to calibrate on."
                 )
 
-            X, y, _ = dataset.xy_for_drug(drug)
+            X, y, groups = dataset.xy_for_drug(drug)
             train_profiles = X.iloc[split.train].to_numpy(dtype=float)
 
             X_cal, y_cal = X.iloc[split.calibration], y[split.calibration]
-            raw = np.array(
+            raw_cal = np.array(
                 [model.probability_resistant(row) for _, row in X_cal.iterrows()]
             )
 
+            # A held-out calibration slice is the cleanest thing to fit Platt on,
+            # and it stays the only source whenever it is big enough. Below
+            # MIN_CALIBRATION_ROWS it is augmented with out-of-fold predictions
+            # over the training rows — a deliberate bias-for-variance trade,
+            # taken only where the variance is fatal.
+            #
+            # Why it is fatal at small n: on the real E. coli data the slice is
+            # 7-8 rows, and a sigmoid fitted on that collapses onto the slice's
+            # own base rate. Every genome then scored within ~0.05 of the prior,
+            # all on one side of 0.5, and the no-call band swallowed the lot —
+            # 100% no-call on ampicillin and trimethoprim, recall_R exactly 0.000
+            # on ciprofloxacin, while the SAME raw probabilities scored 0.875 /
+            # 0.833 / 0.771 balanced accuracy at a plain 0.5 threshold.
+            #
+            # Why it is not free: fold models train on less data than the
+            # production model, so their probabilities are systematically less
+            # confident and Platt learns to over-sharpen. Measured on synthetic
+            # (63-77 row slices), pooling made Ciprofloxacin's Brier WORSE,
+            # 0.1559 -> 0.1687. That measurement is what set the threshold, and
+            # tests/test_calibration.py pins it.
+            fit_raw, fit_y = raw_cal, np.asarray(y_cal)
+            if len(y_cal) < MIN_CALIBRATION_ROWS:
+                oof_raw, oof_y = _oof_probabilities(
+                    dataset, drug, split.train, groups, predictor
+                )
+                if len(oof_raw):
+                    fit_raw = np.concatenate([raw_cal, oof_raw])
+                    fit_y = np.concatenate([np.asarray(y_cal), oof_y])
+
             platt: LogisticRegression | None = None
             failure: str | None = None
-            if len(np.unique(y_cal)) < 2:
+            if len(np.unique(fit_y)) < 2:
                 failure = (
-                    f"calibration slice holds only class {np.unique(y_cal).tolist()} "
-                    f"across {len(y_cal)} rows — Platt scaling needs both classes"
+                    f"calibration data holds only class {np.unique(fit_y).tolist()} "
+                    f"across {len(fit_y)} rows — Platt scaling needs both classes"
                 )
             else:
                 platt = LogisticRegression(solver="lbfgs")
-                platt.fit(_logit(raw).reshape(-1, 1), y_cal)
+                platt.fit(_logit(fit_raw).reshape(-1, 1), fit_y)
 
             calibrator.per_drug[drug] = DrugCalibrator(
                 drug=drug,
@@ -199,7 +291,7 @@ class Calibrator:
                 ood_threshold=_ood_threshold(
                     train_profiles, X_cal.to_numpy(dtype=float)
                 ),
-                n_calibration=len(y_cal),
+                n_calibration=len(fit_y),
                 fit_failure=failure,
             )
         return calibrator

@@ -31,15 +31,35 @@ import pandas as pd
 
 # Mash distance threshold for "same cluster".
 #
-# 0.05 Mash distance ~= 95% average nucleotide identity. This is deliberately
-# CONSERVATIVE (it merges aggressively, producing fewer/larger clusters than a
-# tighter threshold would). Erring toward over-merging costs us a little test-set
-# size; erring the other way silently leaks near-identical genomes across the
-# split and inflates every metric. We take the honest, pessimistic side.
+# 0.02 (~98% ANI). Still deliberately conservative — it merges more aggressively
+# than a strain-level threshold would. Erring toward over-merging costs a little
+# test-set size; erring the other way silently leaks near-identical genomes
+# across the split and inflates every metric. We take the pessimistic side.
 #
-# 95% ANI is also roughly the accepted species boundary, so within our single
-# target species this groups strains, not species.
-DEFAULT_MASH_THRESHOLD = 0.05
+# This was 0.05 (~95% ANI), chosen because 95% ANI is the accepted *species*
+# boundary. That reasoning does not survive contact with single-species data.
+# Measured over all 7,021 pairs of the 119 real E. coli genomes:
+#
+#     median pairwise distance   0.0613     p25   0.0509
+#
+#     threshold   clusters   largest   singletons
+#     0.05           2         118          1
+#     0.03          54          49         47
+#     0.02         102           6         95
+#     0.01         117           3        116
+#
+# A quarter of all pairs sit below 0.05, so single-linkage chains 118 of 119
+# genomes into one cluster and no grouped split is possible at all. Every E. coli
+# pair clears the species boundary by definition; within one species it carries
+# no information.
+#
+# Note what the same table says about the data: only ONE pair sits below 0.002,
+# so this sample has almost no clonal redundancy, and a grouped split here is
+# nearly a random split. That is a fact about BV-BRC's sampling, not a licence to
+# drop grouping — a collection built from outbreak isolates would be heavily
+# clonal, and you cannot know which you have until you measure. Regenerate the
+# table before quoting a leakage gap on any new dataset.
+DEFAULT_MASH_THRESHOLD = 0.02
 
 # MinHash sketch parameters. k=21 is the Mash default for bacterial genomes:
 # long enough that random 21-mer collisions are negligible at a ~5 Mb genome

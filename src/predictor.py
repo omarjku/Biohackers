@@ -153,21 +153,130 @@ class DrugModel:
     evidence_exclusions: frozenset[str] = frozenset()
     n_train: int = 0
     n_train_clusters: int = 0
+    #: {allele: family} when the model was fitted on aggregated features.
+    #: `feature_names` then holds FAMILY names, and any raw genome row must be
+    #: aggregated through this mapping before it can be scored.
+    family_map: dict[str, str] | None = None
 
     def probability_resistant(self, row: pd.Series) -> float:
         """P(resistant) for one genome. Uncalibrated."""
-        x = row.reindex(self.feature_names).fillna(0).to_numpy(dtype=float)
+        if self.family_map is not None:
+            x = _row_to_families(row, self.family_map, self.feature_names).to_numpy(
+                dtype=float
+            )
+        else:
+            x = row.reindex(self.feature_names).fillna(0).to_numpy(dtype=float)
         return float(self.estimator.predict_proba(x.reshape(1, -1))[0, 1])
 
     def positive_drivers(self, row: pd.Series) -> list[str]:
-        """Features present in this genome that push the model toward resistant."""
-        present = [
-            (name, coef)
-            for name, coef in zip(self.feature_names, self.estimator.coef_[0])
-            if coef > 0 and row.get(name, 0) == 1
-        ]
+        """
+        Alleles present in this genome that push the model toward resistant.
+
+        Returns ALLELE-level names even when the model was fitted on families.
+        The coefficient belongs to the family, but the evidence a human needs is
+        the specific variant that was detected — "blaCTX-M-15", not "blaCTX-M".
+        Alleles inherit their family's coefficient for ranking, which is exactly
+        what the model actually learned.
+        """
+        if self.family_map is None:
+            present = [
+                (name, coef)
+                for name, coef in zip(self.feature_names, self.estimator.coef_[0])
+                if coef > 0 and row.get(name, 0) == 1
+            ]
+        else:
+            coefficients = dict(zip(self.feature_names, self.estimator.coef_[0]))
+            present = [
+                (allele, coefficients[family])
+                for allele, family in self.family_map.items()
+                if coefficients.get(family, 0.0) > 0 and row.get(allele, 0) == 1
+            ]
         present.sort(key=lambda pair: -pair[1])
         return [name for name, _ in present]
+
+
+#: Trailing allele designation on an acquired gene: "blaCTX-M-15" -> "blaCTX-M",
+#: "dfrA17" -> "dfrA", "qnrS1" -> "qnrS". Anchored to the end so the interior
+#: hyphens and digits that are part of the family name itself survive.
+_ALLELE_SUFFIX = re.compile(r"-?\d+$")
+
+
+def gene_family(feature_name: str) -> str:
+    """
+    Collapse a feature to the gene family that carries its resistance mechanism.
+
+    "blaTEM-1", "blaTEM-12", "blaTEM-30" -> "blaTEM";  "gyrA_S83L" -> "gyrA".
+
+    Why the model needs this: AMR resistance here is spread across many rare
+    allelic variants rather than a few common genes. In the real E. coli matrix
+    the eight dfrA alleles sit in one or two genomes each, so as separate columns
+    they are near-singletons that 33 training rows cannot learn from — which is
+    what forces regularization heavy enough to compress every probability toward
+    0.5. Aggregated, dfrA is one feature present in 42 of 119 genomes.
+
+    Filtering by prevalence instead would delete the biology: at a >=3-occurrence
+    threshold only 1 of 25 curated ampicillin genes and 1 of 8 trimethoprim genes
+    survive. Aggregation keeps every signal and merely stops splitting it.
+
+    The justification is a priori, not selected on test performance: allelic
+    variants of a gene confer the same resistance, which is how clinical AMR
+    interpretation already reasons ("an ESBL is present", not "blaCTX-M-15 is
+    present"). Measured across 8 grouped seeds it widens probability spread
+    (0.318->0.364, 0.421->0.500, 0.369->0.440) at an AUROC cost within noise.
+
+    Used for MODELLING ONLY. Evidence shown to a human stays allele-level — see
+    DrugModel.positive_drivers — because "blaCTX-M-15 detected" is the useful
+    statement and "blaCTX-M detected" throws away the identification.
+
+    OFF BY DEFAULT (fit_drug_model(aggregate_families=False)). The reasoning
+    above is sound and the spread gain is real, but measured end-to-end over 8
+    grouped seeds on the real data it does not pay for itself:
+
+        drug            AUROC           Brier           bal_acc
+        Ampicillin      0.894 -> 0.850  0.170 -> 0.180  0.750 -> 0.625
+        Ciprofloxacin   0.859 -> 0.833  0.116 -> 0.125  0.738 -> 0.625
+        Trimethoprim    0.940 -> 0.948  0.127 -> 0.105  0.844 -> 0.896
+
+    It helps trimethoprim on every metric and hurts the other two on every
+    metric. It also roughly doubles synthetic Ciprofloxacin's raw Brier
+    (0.1559 -> 0.2793), because synth_data.py plants its signal in SPECIFIC
+    alleles, so merging gyrA_S83L with gyrA_D87N destroys what the fixture
+    encoded — a reminder that the synthetic set is not biologically faithful.
+
+    Kept rather than deleted because the mechanism is real and the trimethoprim
+    result suggests it may become correct at larger n, where each family has
+    enough members to beat the information it discards. Re-measure before
+    turning it on; do not enable it per-drug on the strength of the table above,
+    which would be selecting a model on test results.
+    """
+    gene, mutation = _parse_feature_name(feature_name)
+    if mutation is not None:
+        return gene
+    return _ALLELE_SUFFIX.sub("", feature_name) or feature_name
+
+
+def aggregate_to_families(X: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
+    """
+    Collapse a genome x allele matrix to genome x family, presence-wise.
+
+    Returns the aggregated frame and the {allele: family} mapping used, so a
+    single row can be aggregated the same way at prediction time.
+    """
+    mapping = {column: gene_family(column) for column in X.columns}
+    aggregated = X.T.groupby(pd.Series(mapping), sort=True).max().T
+    return aggregated, mapping
+
+
+def _row_to_families(
+    row: pd.Series, mapping: dict[str, str], family_names: list[str]
+) -> pd.Series:
+    """Aggregate one genome's allele row into the model's family feature space."""
+    present = pd.Series(0, index=family_names, dtype=float)
+    for allele, value in row.items():
+        family = mapping.get(allele)
+        if family in present.index and value == 1:
+            present[family] = 1.0
+    return present
 
 
 def cluster_sample_weights(groups: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -208,9 +317,21 @@ def fit_drug_model(
     groups: np.ndarray,
     C: float = DEFAULT_C,
     weight_by_cluster: bool = True,
+    aggregate_families: bool = False,
 ) -> DrugModel:
     """Fit one antibiotic's model on the given training row positions."""
     X, y, _ = dataset.xy_for_drug(drug)
+
+    # Collapse allelic variants into gene families before fitting — see
+    # gene_family(). The mapping is a pure function of the column name, so doing
+    # it over the whole matrix leaks nothing: no label, no row, and no split
+    # membership is consulted. It stays inside the fit path so the production
+    # model and the out-of-fold fold models in calibration.py cannot drift into
+    # different feature spaces.
+    family_map: dict[str, str] | None = None
+    if aggregate_families:
+        X, family_map = aggregate_to_families(X)
+
     X_train, y_train = X.iloc[train_rows], y[train_rows]
 
     if len(np.unique(y_train)) < 2:
@@ -255,6 +376,7 @@ def fit_drug_model(
         evidence_exclusions=frozenset(all_targets),
         n_train=len(train_rows),
         n_train_clusters=len(set(groups[train_rows])),
+        family_map=family_map,
     )
 
 
@@ -269,6 +391,11 @@ class Predictor:
 
     models: dict[str, DrugModel] = field(default_factory=dict)
     splits: dict[str, GroupedSplit] = field(default_factory=dict)
+    # Retained so calibration.py can refit fold models with the SAME
+    # hyperparameters. Out-of-fold probabilities calibrate the production model
+    # only if they came from an identically-configured one.
+    C: float = DEFAULT_C
+    weight_by_cluster: bool = True
 
     @classmethod
     def fit(
@@ -291,7 +418,7 @@ class Predictor:
         cluster_sample_weights(). Turn it off only to reproduce the unweighted
         baseline for comparison; it should stay on for anything reported.
         """
-        predictor = cls()
+        predictor = cls(C=C, weight_by_cluster=weight_by_cluster)
         for drug in drugs or dataset.drugs:
             _, y, groups = dataset.xy_for_drug(drug)
             split = grouped_split(groups, y=y, seed=seed)

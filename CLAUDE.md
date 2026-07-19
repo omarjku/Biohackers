@@ -48,7 +48,9 @@ Actual layout (as of 2026-07-19; paths are relative to this file's directory, `*
     labels_sampled.csv          # 2,400 rows, the working label set
     genome_id_list.csv          # 2,154 genome ids to fetch
     {Ampicillin,Ciprofloxacin,Trimethoprim} {Resistant,Susceptible}.csv
-    raw/                        # EMPTY — no real feature matrix yet
+    raw/                        # files.zip (real AMRFinderPlus matrix + metadata),
+                                # genome_clusters.csv, genome_clusters_mash.csv, fasta/ (gitignored)
+    processed/                  # the four contract files, built by adapt_real_data.py (gitignored)
     synthetic/                  # seeded fixtures (seed=7): features/labels/genomes/drug_targets
   docs/DATA_CONTRACT.md   # column contract data_io.py validates against
   src/
@@ -56,14 +58,17 @@ Actual layout (as of 2026-07-19; paths are relative to this file's directory, `*
     data_io.py            # contract loader + validation
     splits.py             # MinHash/Mash clustering + grouped train/calib/test split
     synth_data.py         # synthetic fixture generator
+    adapt_real_data.py    # Moncef's real outputs -> the four contract files
     predictor.py          # Module 02: per-drug logistic regression, target gate, evidence tiering
+    calibration.py        # Platt scaling (+OOF below 40 rows) + no-call gate + OOD envelope
+    evaluation.py         # multi-seed metrics, per-cluster breakdown, leakage comparison, dashboard
     explainer.py          # GPT-4 explanation generation
-    genome_reader.py    * # Module 01: AMRFinderPlus -> feature matrix
-    drug_database.py    * # antibiotic -> target gene mapping
-    calibration.py      * # Platt scaling + no-call logic
-    evaluation.py       * # metrics + plots
+    genome_reader.py      # Module 01: AMRFinderPlus -> feature matrix (has a CLI)
+    drug_database.py      # antibiotic -> target gene + curated resistance genes
     app.py              * # Streamlit frontend
-  tests/test_explainer.py # only module under test so far
+  tests/                  # 101 tests: splits, predictor, calibration, genome_reader, explainer
+  reports/                # synthetic evaluation output
+  reports_real/           # real-data evaluation output
   models/                 # EMPTY — nothing trained/saved yet
   requirements.txt
   README.md
@@ -102,8 +107,18 @@ Actual layout (as of 2026-07-19; paths are relative to this file's directory, `*
 ## Current status (2026-07-19)
 
 Status below is repo-wide, not one person's worklist — it was last refreshed from branch
-`person-a/ml-pipeline` at `4a7b2d9`. If you are on another branch, treat file-level claims here as
-a baseline and check the tree before relying on them.
+`person-a/real-data-integration` (branched off `origin/main` at `54e81ef`). If you are on another
+branch, treat file-level claims here as a baseline and check the tree before relying on them.
+
+**Real data has landed and the pipeline runs end to end on it.** Moncef's AMRFinderPlus run
+produced `data/raw/files.zip` (feature matrix, gene metadata, target-gate results) plus
+`data/raw/genome_clusters.csv`. `src/adapt_real_data.py` converts those into the four contract
+files in `data/processed/`: **119 E. coli genomes x 124 AMR features, 143 label rows**
+(Ampicillin 41, Ciprofloxacin 51, Trimethoprim 51). Run `python src/adapt_real_data.py`, then
+evaluate with `run_full_evaluation(Path("data/processed"), Path("reports_real"))`.
+
+The dataset is small enough that this is a working pipeline, not a competitive model — see
+"What the real numbers actually say" below before quoting anything.
 
 Built and running: `schemas.py` (shared Prediction contract), `data_io.py` (contract loader +
 validation, against `docs/DATA_CONTRACT.md`), `splits.py` (MinHash/Mash clustering, grouped
@@ -117,20 +132,31 @@ four-panel dashboard — run `python src/evaluation.py`, writes to `reports/`), 
 `verify_patch.py` at the repo root (biosecurity compliance harness: de-duplication, target gate,
 LLM constraints, disclaimer — run `python verify_patch.py`).
 
-Still one-line TODO stubs, no implementation — each with its owner: `genome_reader.py` and
-`drug_database.py` (Moncef, both blocking downstream work), `app.py` (UI owner). `models/` is
-empty — nothing has been trained and saved.
+`genome_reader.py` and `drug_database.py` are implemented (Moncef, plus fixes below).
+`genome_reader.py` now has a CLI — `python src/genome_reader.py --fasta-dir <dir> --out-dir <dir>`
+— that annotates concurrently, caches each TSV so a failed batch resumes, and emits both
+`features.csv` and `gene_metadata.csv`. **`app.py` is still a one-line stub (UI owner)** and
+`models/` is still empty.
 
-**`data/raw/` is empty — there is no real feature matrix yet.** Labels exist in `data/` (E. coli
-taxon 562; ampicillin, ciprofloxacin, trimethoprim). `labels_sampled.csv` is the working set:
-2,400 rows, columns `genome_id,genome_name,antibiotic,phenotype,lab_method` — filter on
-`lab_method` to keep laboratory-measured results only. `genome_id_list.csv` holds the 2,154 genome
-ids still to fetch from BV-BRC; the six `<Drug> <Phenotype>.csv` files are the unsampled BV-BRC
-pulls behind it. Everything currently runs on synthetic fixtures. Note the synthetic drugs
+Labels live in `data/` (E. coli taxon 562). `labels_sampled.csv` is the working set: 2,400 rows,
+columns `genome_id,genome_name,antibiotic,phenotype,lab_method` — filter on `lab_method` to keep
+laboratory-measured results only. `genome_id_list.csv` holds 2,154 genome ids; **only 119 have
+FASTAs so far**, so scaling up means fetching the rest from BV-BRC and running the
+`genome_reader.py` CLI over them. Note the synthetic drugs
 (Ceftriaxone/Ciprofloxacin/Gentamicin/Meropenem) are NOT the real label drugs — only Ciprofloxacin
 overlaps.
 
+**Never train on synthetic and real data together.** Measured: only 17 of the 124 real features
+exist in the 24-feature synthetic set, only 1 of 4 synthetic drugs overlaps the real ones, and
+near-miss names (`aac(6')-Ib-cr` vs `aac(6')-Ib-cr5`) would align silently and wrongly. More
+fundamentally `synth_data.py` is a fixture generator seeded at 7 to exercise code paths, never a
+validated biological simulator — its labels come from a made-up rule, so a model trained on them
+learns that rule. Synthetic is for test fixtures and clearly-labelled methodology demos only.
+
 ### The headline number
+
+**This table is SYNTHETIC. It does not reproduce on real data — see the next section. Label it
+as a methodology demonstration whenever it is shown, never as a result about E. coli.**
 
 Same model, random split vs. grouped split, balanced accuracy on synthetic data, mean ± sd over 8
 seeds. Regenerate with `python src/evaluation.py`.
@@ -168,12 +194,74 @@ penalty" was the grouped model being scored against a differently-balanced test 
 Do not resurrect the old figures — if anyone quotes +0.308, it came from our own bug. Always
 average over several seeds; single-seed gaps still swing by ±0.05.
 
+### What the real numbers actually say
+
+Real data, 8 grouped seeds. Regenerate with `run_full_evaluation(Path("data/processed"),
+Path("reports_real"))`. `scoreable` counts seeds where the answered rows held BOTH classes —
+decision metrics are undefined otherwise and are reported as NaN rather than a flattering number.
+
+| drug | coverage | bal_acc | scoreable | recall_R | AUROC | brier raw → cal |
+|---|---|---|---|---|---|---|
+| Ampicillin | 25.0 ±17.4 | 0.500 ±0.000 | **1 of 8** | 1.000 | 0.894 ±0.104 | 0.194 → 0.171 |
+| Ciprofloxacin | 80.7 ±8.4 | 0.821 ±0.175 | 7 of 8 | 0.643 ±0.350 | 0.859 ±0.144 | 0.183 → 0.108 |
+| Trimethoprim | 42.5 ±22.2 | 0.700 ±0.245 | 5 of 8 | 0.400 ±0.490 | 0.940 ±0.062 | 0.193 → 0.142 |
+
+How to read this honestly:
+
+- **The models are real.** AUROC 0.86–0.94 means the biology is being learned. Calibration now
+  improves Brier on all three drugs.
+- **The decisions are weak and seed-dependent.** Test slices are 9–11 genomes, so those standard
+  deviations are the story, not the means. Never quote a single split.
+- **Ampicillin is degenerate.** It only ever answers genomes that are truly resistant — measured
+  over 8 seeds, ZERO test rows ever landed below the 0.30 no-call floor (p5 of its calibrated
+  distribution is 0.368). So its answered slice is single-class almost always, `recall_S` is 0 by
+  construction, and `bal_acc` 0.500 is the honest reading. When it does answer resistant it is
+  right 23 of 24 times. The fix is more data, not a wider band.
+- **`recall_R` is the weak side everywhere.** The models miss resistant cases far more often than
+  they misclassify susceptible ones. In this domain that is the dangerous direction.
+
+**The leakage gap does NOT reproduce on real data.** Measured mean gap is ≈ −0.01 with enormous
+spread (±0.234 on Ciprofloxacin random). That is not a failure — it follows from the clustering:
+only ONE genome pair sits below Mash 0.002, so this sample has almost no clonal redundancy and a
+grouped split is nearly a random split. A collection built from outbreak isolates would behave
+completely differently. Say this out loud rather than hiding it; "we measured our own headline
+claim and it didn't hold here, and here is why" is a stronger position than a number that breaks
+under questioning.
+
 ### Decisions made (don't silently reverse)
 
 - Positive class y=1 is RESISTANT ("likely to fail"). Resistance is the event being detected.
-- Mash threshold 0.05 (~95% ANI), deliberately over-merging. Rationale is inline in `splits.py`.
-- Calibration is a third split, separate from train and test — Platt on train is biased, Platt on
-  test leaks.
+- **Mash threshold 0.02 (~98% ANI)**, still deliberately over-merging. Was 0.05 (~95% ANI, the
+  *species* boundary), which does not survive single-species data: a quarter of all real E. coli
+  pairs sit below 0.05, so single-linkage chained 118 of 119 genomes into ONE cluster and no
+  grouped split was possible. Measured sweep (clusters at each threshold: 0.05→2, 0.03→54,
+  0.02→102, 0.01→117) is inline in `splits.py`. Re-derive this on any new dataset.
+- **Calibration is a held-out third split whenever that split is big enough**, and below
+  `MIN_CALIBRATION_ROWS = 40` it is augmented with out-of-fold predictions over the training rows
+  (grouped folds, so no genome is scored by a model that saw its cluster). Platt on train is still
+  biased and Platt on test still leaks — neither is what this does. Why the change: the real
+  calibration slices are 7–8 rows, and a sigmoid fitted on that collapses onto the slice's own base
+  rate, which caused 100% no-call on two drugs and `recall_R` exactly 0.000 on the third while the
+  same raw probabilities scored 0.875/0.833/0.771 balanced accuracy at a plain 0.5 threshold. Why
+  it is conditional: out-of-fold rows come from models trained on less data, so Platt over-sharpens
+  — on synthetic (61–77 row slices) unconditional pooling made Ciprofloxacin's Brier WORSE, 0.1559
+  → 0.1687. That regression set the threshold and
+  `tests/test_calibration.py::test_calibration_improves_brier_on_held_out_test` pins it. **Do not
+  weaken that test to make a change pass — it is the canary.**
+- **Report multi-seed mean ± sd, never a single split.** `evaluation.multi_seed_metrics()` is the
+  headline table; the seed-0 table is printed only for the dashboard plots and is labelled
+  not-for-quoting. At 9–11 test rows per drug a single split swings wildly.
+- **Decision metrics are NaN when the answered slice is single-class.** `balanced_accuracy_score`
+  does not raise on single-class `y_true` — it silently degrades to plain accuracy. That reported
+  ampicillin at 0.917 alongside `recall_R` 1.000 and `recall_S` 0.000, three numbers that cannot
+  all be true. Guarded by `evaluation._decision_metrics_defined()`.
+- **Gene-family aggregation is available but OFF** (`fit_drug_model(aggregate_families=False)`).
+  Collapsing allelic variants (`blaTEM-1/-12/-30` → `blaTEM`) is biologically sound and widens
+  probability spread, but measured end-to-end it helps Trimethoprim on every metric and hurts the
+  other two on every metric, and it doubles synthetic Ciprofloxacin's raw Brier because
+  `synth_data.py` plants signal in specific alleles. Full table in `predictor.gene_family`'s
+  docstring. Re-measure before enabling; do NOT enable per-drug on the strength of that table,
+  which would be selecting a model on test results.
 - Missing feature *column* means `target_gate_status="unknown"`, never `"absent"`. Absence of data
   is not absence of gene.
 - `evidence_category` is never promoted to `known_gene_or_mutation` by coefficient size. Only genes
@@ -185,9 +273,19 @@ average over several seeds; single-seed gaps still swing by ±0.05.
 
 ### Known gaps to fix
 
-- **No de-duplication.** The brief asks for it; we do grouped *splitting*, which stops leakage, but
-  large clusters still dominate training (biggest = 19% of train rows). Consider per-cluster
-  sample weights.
+- **THE binding constraint: 143 label rows.** Everything weak about the model is downstream of
+  this. Only 119 of the 2,154 genome ids have FASTAs, giving 25–33 training rows and 7–8
+  calibration rows per drug. Nothing in the modelling layer substitutes for more genomes — fetch
+  the rest from BV-BRC and run the `genome_reader.py` CLI. Estimated cost at 2,154 genomes: ~11 GB
+  download, and note `splits.py`'s pure-Python MinHash took 19 minutes for 119 genomes (≈5.7 hours
+  extrapolated), so scaling also means swapping it for the real `mash`/`sourmash` binary.
+- ~~No de-duplication.~~ **Done.** `cluster_sample_weights()` weights each genome by 1/(cluster
+  size) and equalises class weight on top, so every cluster counts once regardless of how often it
+  was sequenced. Note this already applies class balancing — do NOT add `class_weight="balanced"`
+  on top, it would be applied twice.
+- **AMRFinderPlus is not installed in this environment** and Docker's daemon is not running. The
+  119-genome matrix came from Moncef's machine. Anyone scaling the dataset needs the toolchain
+  working locally first — validate on ~5 genomes before committing to a full run.
 - ~~`grouped_split()` balances cluster size, not label.~~ **Fixed.** The allocator now sends each
   cluster to the split furthest behind on its per-class targets, weighted by the cluster's own
   class mix. Ciprofloxacin went from 40/35/70 to 45.4/44.9/45.7 percent resistant across
@@ -197,8 +295,20 @@ average over several seeds; single-seed gaps still swing by ±0.05.
   (Relative vs. absolute class deficits, by contrast, were measured equivalent — spread 0.023 vs
   0.021. An earlier note here claimed absolute deficits starve the small splits; that was
   asserted without measurement and was wrong.)
-- **`drug_database.KNOWN_RESISTANCE_GENES` does not exist yet** — that exact symbol is what
-  `predictor.py` imports. Until Moncef adds it, every prediction is `statistical_association`.
+- ~~`drug_database.KNOWN_RESISTANCE_GENES` does not exist.~~ **Done.** 25 ampicillin, 18
+  ciprofloxacin, 8 trimethoprim genes, derived from AMRFinderPlus `amr_class`/`amr_subclass` then
+  narrowed by hand; all 51 resolve against the real matrix. Nonspecific efflux/porin regulators
+  (`acrR`, `marR`, `ompC`) and cefiderocol-uptake `cirA` truncations are deliberately excluded and
+  report as `statistical_association`.
+- **The target gate cannot fire on this feature matrix, for any of the three drugs.** Not a bug:
+  AMRFinderPlus only reports an essential gene when it is mutated or disrupted, so no bare
+  `ftsI`/`gyrA`/`parC`/`folA` column exists and `predictor.target_gate()` correctly returns
+  `"unknown"` rather than `"absent"`. Present it as honest-by-construction, not as a filter doing
+  active work. (`DRUG_TARGET_MAP`'s ampicillin entry was `pbp3,pbp1A,pbp1B,pbp2` — AMRFinderPlus
+  emits none of those symbols in any form; it calls PBP3 `ftsI`. Fixed.)
+- **`genome_reader.check_target_gate()` is deprecated dead code** with two bugs (title-case drug
+  keys that never match the lowercase labels, and no `"unknown"` branch so an unseen genome falls
+  through to `"present"`). `predictor.target_gate()` is the real one. Do not wire the other up.
 
 ## Team roles and file ownership
 
