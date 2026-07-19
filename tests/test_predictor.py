@@ -262,3 +262,137 @@ def test_every_prediction_validates_against_the_schema(dataset, predictor):
         )
         assert 0.0 <= prediction.confidence <= 1.0
         assert prediction.target_gate_status in ("present", "absent", "unknown")
+
+
+class TestMutationNameParsing:
+    """
+    Feature-name parsing against real AMRFinderPlus E. coli nomenclature.
+
+    The original pattern handled plain substitutions only and silently failed to
+    split 20 of the 41 mutation features in the real matrix, leaving
+    gene="cirA_Q56Ter" with mutation=None. Evidence exclusions and
+    KNOWN_RESISTANCE_GENES both match on the parsed gene name, so an unsplit
+    feature is never recognised as belonging to its gene.
+
+    Every name below is taken from data/raw/files.zip, not invented.
+    """
+
+    @pytest.mark.parametrize(
+        "feature, gene, mutation",
+        [
+            ("gyrA_S83L", "gyrA", "S83L"),            # substitution
+            ("parC_S80I", "parC", "S80I"),
+            ("cirA_Q56Ter", "cirA", "Q56Ter"),        # nonsense / stop
+            ("ompC_Q104Ter", "ompC", "Q104Ter"),
+            ("acrR_V29YfsTer44", "acrR", "V29YfsTer44"),   # frameshift
+            ("nfsA_L43CfsTer18", "nfsA", "L43CfsTer18"),
+            ("ftsI_I336IKYRI", "ftsI", "I336IKYRI"),  # in-frame insertion
+            ("ampC_T-32A", "ampC", "T-32A"),          # negative promoter position
+            ("blaTEMp_C32T", "blaTEMp", "C32T"),      # promoter, nucleotide-level
+        ],
+    )
+    def test_real_mutation_names_split(self, feature, gene, mutation):
+        from predictor import _parse_feature_name
+
+        assert _parse_feature_name(feature) == (gene, mutation)
+
+    @pytest.mark.parametrize(
+        "feature",
+        [
+            "blaTEM-1",
+            "blaCTX-M-15",
+            "aac(6')-Ib-cr5",
+            "aph(3'')-Ib",
+            "dfrA17",
+            "qnrS1",
+        ],
+    )
+    def test_acquired_gene_names_are_never_split(self, feature):
+        """An acquired gene has no mutation component — splitting one would
+        invent a mutation that AMRFinderPlus never reported."""
+        from predictor import _parse_feature_name
+
+        assert _parse_feature_name(feature) == (feature, None)
+
+
+class TestGeneFamilyAggregation:
+    """
+    Gene-family aggregation is OFF by default (see gene_family's docstring for the
+    measurement that turned it off). These tests keep the machinery correct while
+    it is dormant, so re-enabling it at larger n is a one-flag change rather than
+    a re-derivation.
+    """
+
+    @pytest.mark.parametrize(
+        "feature, family",
+        [
+            ("blaTEM-1", "blaTEM"),
+            ("blaTEM-30", "blaTEM"),
+            ("blaCTX-M-15", "blaCTX-M"),
+            ("blaCTX-M-27", "blaCTX-M"),
+            ("dfrA17", "dfrA"),
+            ("dfrA1", "dfrA"),
+            ("qnrS1", "qnrS"),
+            ("gyrA_S83L", "gyrA"),
+            ("gyrA_D87N", "gyrA"),
+            ("cirA_Q56Ter", "cirA"),
+            ("ampC_T-32A", "ampC"),
+        ],
+    )
+    def test_alleles_collapse_to_their_family(self, feature, family):
+        from predictor import gene_family
+
+        assert gene_family(feature) == family
+
+    def test_aggregation_is_presence_wise_union(self):
+        from predictor import aggregate_to_families
+
+        X = pd.DataFrame(
+            {"blaTEM-1": [1, 0, 0], "blaTEM-30": [0, 1, 0], "dfrA17": [1, 0, 0]},
+            index=["g1", "g2", "g3"],
+        )
+        aggregated, mapping = aggregate_to_families(X)
+
+        assert list(aggregated.columns) == ["blaTEM", "dfrA"]
+        # g1 and g2 carry different blaTEM alleles — both are blaTEM-positive.
+        assert aggregated.loc["g1", "blaTEM"] == 1
+        assert aggregated.loc["g2", "blaTEM"] == 1
+        assert aggregated.loc["g3", "blaTEM"] == 0
+        assert mapping["blaTEM-30"] == "blaTEM"
+
+    def test_aggregation_does_not_consult_labels_or_rows(self):
+        """The mapping is a pure function of column names, which is why applying
+        it over the whole matrix cannot leak."""
+        from predictor import aggregate_to_families
+
+        base = pd.DataFrame({"blaTEM-1": [1, 0], "dfrA17": [0, 1]}, index=["a", "b"])
+        flipped = pd.DataFrame({"blaTEM-1": [0, 1], "dfrA17": [1, 0]}, index=["a", "b"])
+
+        assert aggregate_to_families(base)[1] == aggregate_to_families(flipped)[1]
+
+    def test_evidence_stays_allele_level_when_model_uses_families(self, dataset):
+        """A clinician needs 'blaCTX-M-15 detected', not 'blaCTX-M detected'."""
+        from predictor import fit_drug_model
+
+        drug = dataset.drugs[0]
+        _, y, groups = dataset.xy_for_drug(drug)
+        model = fit_drug_model(
+            dataset, drug, np.arange(len(y)), groups, aggregate_families=True
+        )
+        assert model.family_map is not None
+
+        row = dataset.features.loc[dataset.features.index[0]]
+        drivers = model.positive_drivers(row)
+        # Every driver must be a real column of the ORIGINAL matrix, not a family.
+        assert all(name in dataset.features.columns for name in drivers)
+
+    def test_aggregated_model_can_score_a_raw_genome_row(self, dataset):
+        from predictor import fit_drug_model
+
+        drug = dataset.drugs[0]
+        _, y, groups = dataset.xy_for_drug(drug)
+        model = fit_drug_model(
+            dataset, drug, np.arange(len(y)), groups, aggregate_families=True
+        )
+        row = dataset.features.loc[dataset.features.index[0]]
+        assert 0.0 <= model.probability_resistant(row) <= 1.0

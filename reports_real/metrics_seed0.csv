@@ -1,0 +1,4 @@
+drug,n_test,pct_R,coverage,n_answered,bal_acc,recall_R,recall_S,f1_R,auroc,pr_auc,brier_raw,brier_cal,no_call,not_appl
+Ampicillin,9,55.6,22.2,2,,,,,0.95,0.967,0.1884,0.1525,77.8,0.0
+Ciprofloxacin,11,27.3,81.8,9,0.5,0.0,1.0,0.0,0.667,0.5,0.2373,0.2361,18.2,0.0
+Trimethoprim,10,40.0,50.0,5,1.0,1.0,1.0,1.0,0.958,0.95,0.1966,0.131,50.0,0.0
