@@ -63,13 +63,17 @@ Actual layout (as of 2026-07-19; paths are relative to this file's directory, `*
     predictor.py          # Module 02: per-drug logistic regression, target gate, evidence tiering
     calibration.py        # Platt scaling (+OOF below 40 rows) + no-call gate + OOD envelope
     evaluation.py         # multi-seed metrics, per-cluster breakdown, leakage comparison, dashboard
-    explainer.py          # GPT-4 explanation generation
+    explainer.py          # GPT-4 + template explanations; explain_report() -> frontend JSON
     genome_reader.py      # Module 01: AMRFinderPlus -> feature matrix (has a CLI)
     drug_database.py      # antibiotic -> target gene + curated resistance genes
-    app.py              * # Streamlit frontend
-  tests/                  # 101 tests: splits, predictor, calibration, genome_reader, explainer
+    fetch_bvbrc.py        # pull the 2,127-genome dataset from the BV-BRC API -> data/processed
+    fasta_pipeline.py     # live path: FASTA -> AMRFinderPlus -> name-bridge -> predict -> calibrate
+    pipeline.py           # thin adapter app.py calls: run(uploaded_fasta) -> list[Prediction]
+    app.py                # Streamlit frontend (implemented)
+  tests/                  # 129 tests: splits, predictor, calibration, genome_reader, explainer, fetch_bvbrc, fasta_pipeline
   reports/                # synthetic evaluation output
-  reports_real/           # real-data evaluation output
+  reports_real/           # real-data evaluation output (119-genome BASELINE — do not quote)
+  reports_real_scaled/    # real-data evaluation output (2,127 genomes — quote THIS)
   models/                 # EMPTY — nothing trained/saved yet
   requirements.txt
   README.md
@@ -138,11 +142,16 @@ LLM constraints, disclaimer — run `python verify_patch.py`).
 `genome_reader.py` and `drug_database.py` are implemented (Moncef, plus fixes below).
 `genome_reader.py` now has a CLI — `python src/genome_reader.py --fasta-dir <dir> --out-dir <dir>`
 — that annotates concurrently, caches each TSV so a failed batch resumes, and emits both
-`features.csv` and `gene_metadata.csv`. **`app.py` is still the only real stub** — a docstring and a
-`TODO(UI owner)`, no upload screen, no results dashboard, no call into `explainer.py`. **`models/`
-is still empty and nothing in `src/` serializes a model**; see "Known gaps to fix".
+`features.csv` and `gene_metadata.csv`.
 
-Test suite: 101 tests, all passing (`python -m pytest tests/ -q`).
+**`app.py` is implemented** (Streamlit): upload/example-genome → `pipeline.run()` →
+`explainer.explain_report()` → per-drug cards with calibrated confidence, evidence, and the
+mandatory disclaimer. The live path is `app.py → pipeline.py → fasta_pipeline.py`
+(AMRFinderPlus scan → name-bridge onto the NDARO feature vocabulary → predictor → calibration).
+The model trains at runtime from `data/processed/` (built by `src/fetch_bvbrc.py`, **2,127
+genomes**), so `models/` is intentionally empty. See `docs/LIVE_DEMO.md` and `docs/BVBRC_DATA.md`.
+
+Test suite: 129 tests, all passing (`python -m pytest tests/ -q`).
 
 Labels live in `data/` (E. coli taxon 562). `labels_sampled.csv` is the working set: 2,400 rows,
 columns `genome_id,genome_name,antibiotic,phenotype,lab_method` — filter on `lab_method` to keep

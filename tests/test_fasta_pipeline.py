@@ -74,12 +74,13 @@ class TestReportItem:
         assert item["locus_id"] == "ftsI"
         assert "known" in item["bio_explanation"].lower()
 
-    def test_work_reports_susceptibility_confidence_and_wildtype(self):
+    def test_work_reports_susceptibility_confidence_and_no_determinant(self):
         item = explainer.report_item(_pred("Ciprofloxacin", "likely_to_work", 0.06,
                                            "no_known_signal"))
         assert item["underlying_state"] == "Likely to work"
         assert item["confidence"] == pytest.approx(0.94)   # 1 - P(resistant)
-        assert item["target_marker"] == "Wild-Type"
+        # "None detected", never "Wild-Type" — we never confirmed an intact target.
+        assert item["target_marker"] == "None detected"
 
     def test_statistical_is_labelled_not_causal(self):
         item = explainer.report_item(_pred("Ampicillin", "likely_to_fail", 0.8,
