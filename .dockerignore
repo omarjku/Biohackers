@@ -1,0 +1,23 @@
+# Keep the build context small. The container needs src/ + data/processed/
+# (the trained model data) + data/raw/fasta_demo/ (bundled example genomes with
+# their cached AMRFinderPlus TSVs). Everything below is dev-only or regenerable.
+.git
+.gitignore
+**/__pycache__
+*.pyc
+.pytest_cache
+.venv
+venv
+env
+scratchpad
+
+# Large / regenerable data not read at runtime
+data/raw/bvbrc_cache
+data/raw/fasta
+data/raw/files.zip
+reports
+reports_real
+reports_real_scaled
+
+# Local secrets — pass the key at runtime with -e OPENAI_API_KEY instead
+.env
