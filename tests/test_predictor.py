@@ -8,6 +8,7 @@ known_gene_or_mutation on the strength of a coefficient — plus the per-cluster
 de-duplication weights.
 """
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -396,3 +397,88 @@ class TestGeneFamilyAggregation:
         )
         row = dataset.features.loc[dataset.features.index[0]]
         assert 0.0 <= model.probability_resistant(row) <= 1.0
+
+
+# --------------------------------------------------------------------------
+# Curated-gene resolution across feature vocabularies
+#
+# The curated lists are written in AMRFinderPlus ALLELE symbols ("blaTEM-1"),
+# but a matrix built from BV-BRC sp_gene/NDARO carries GENE-FAMILY tokens
+# ("TEM"). Under exact matching only 2 of 51 curated genes resolved there, which
+# silently emptied evidence tiering while the accuracy metrics still looked fine.
+# These pin both directions: family columns must resolve, and allele columns must
+# behave exactly as they did before.
+# --------------------------------------------------------------------------
+
+
+class TestCuratedGeneResolution:
+    def test_allele_columns_resolve_exactly_and_do_not_widen(self):
+        """AMRFinderPlus vocabulary: unchanged behaviour, no extra alleles pulled in."""
+        from drug_database import KNOWN_RESISTANCE_GENES
+        from predictor import curated_feature_columns, resolve_curated_genes
+
+        curated = KNOWN_RESISTANCE_GENES["Trimethoprim"]
+        columns = list(curated) + ["dfrA99", "sul1"]
+
+        resolved = resolve_curated_genes("Trimethoprim", columns)
+        assert set(resolved) == set(curated)
+        # Each curated allele resolves to itself and nothing else.
+        assert all(resolved[gene] == [gene] for gene in curated)
+        # dfrA99 shares a family stem but was never curated by hand — exact
+        # matches win, so the fallback must not reach for it.
+        assert "dfrA99" not in curated_feature_columns("Trimethoprim", columns)
+
+    def test_family_columns_resolve_through_the_stem(self):
+        """NDARO vocabulary: allele-level curated names find the family column."""
+        from predictor import curated_feature_columns, resolve_curated_genes
+
+        columns = ["TEM", "CTX-M", "SHV", "OXA-1", "dfrA", "sul1"]
+
+        amp = resolve_curated_genes("Ampicillin", columns)
+        assert amp["blaTEM-1"] == ["TEM"]
+        assert amp["blaCTX-M-15"] == ["CTX-M"]
+        assert amp["blaOXA-1"] == ["OXA-1"]
+        # Before this resolution existed, exactly one ampicillin gene matched.
+        assert len(amp) > 10
+
+        assert curated_feature_columns("Trimethoprim", columns) == ["dfrA"]
+
+    def test_many_alleles_collapsing_on_one_column_count_once(self):
+        """Otherwise the curated count re-weights toward hand-listed families."""
+        from drug_database import KNOWN_RESISTANCE_GENES
+        from predictor import curated_feature_columns, resolve_curated_genes
+
+        resolved = resolve_curated_genes("Trimethoprim", ["dfrA"])
+        assert len(resolved) == len(KNOWN_RESISTANCE_GENES["Trimethoprim"])
+        assert curated_feature_columns("Trimethoprim", ["dfrA"]) == ["dfrA"]
+
+    def test_mutation_entries_never_fall_back_to_the_bare_gene(self):
+        """
+        Resolving gyrA_S83L onto a "gyrA" column would assert a point mutation
+        nobody observed — sp_gene records presence, not variants.
+        """
+        from predictor import curated_feature_columns, resolve_curated_genes
+
+        columns = ["gyrA", "parC", "parE", "ampC", "ftsI"]
+        assert resolve_curated_genes("Ciprofloxacin", columns) == {}
+        assert curated_feature_columns("Ciprofloxacin", columns) == []
+
+        # ...but the exact mutation column still resolves when it exists.
+        resolved = resolve_curated_genes("Ciprofloxacin", ["gyrA_S83L", "gyrA"])
+        assert resolved == {"gyrA_S83L": ["gyrA_S83L"]}
+
+    def test_unavailable_evidence_warns_instead_of_degrading_silently(self):
+        """
+        Zero resolvable curated genes and "no known biology" look identical
+        downstream and mean opposite things.
+        """
+        from predictor import warn_if_evidence_unavailable
+
+        with pytest.warns(RuntimeWarning, match="statistical_association"):
+            message = warn_if_evidence_unavailable("Ciprofloxacin", ["gyrA", "parC"])
+        assert message is not None
+
+        # Resolvable evidence must stay silent.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert warn_if_evidence_unavailable("Trimethoprim", ["dfrA"]) is None
