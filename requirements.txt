@@ -11,3 +11,4 @@ openai
 matplotlib
 plotly
 joblib
+python-dotenv
