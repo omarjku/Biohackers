@@ -66,8 +66,8 @@ Actual layout (as of 2026-07-19; paths are relative to this file's directory, `*
     explainer.py          # GPT-4 explanation generation
     genome_reader.py      # Module 01: AMRFinderPlus -> feature matrix (has a CLI)
     drug_database.py      # antibiotic -> target gene + curated resistance genes
-    app.py              * # Streamlit frontend
-  tests/                  # 118 tests: splits, predictor, calibration, genome_reader, explainer
+    app.py                # Streamlit frontend (built — clinical console)
+  tests/                  # 129 tests: splits, predictor, calibration, genome_reader, explainer
   reports/                # synthetic evaluation output
   reports_real/           # real-data evaluation output
   models/                 # EMPTY — nothing trained/saved yet
@@ -148,11 +148,12 @@ LLM constraints, disclaimer — run `python verify_patch.py`).
 `genome_reader.py` and `drug_database.py` are implemented (Moncef, plus fixes below).
 `genome_reader.py` now has a CLI — `python src/genome_reader.py --fasta-dir <dir> --out-dir <dir>`
 — that annotates concurrently, caches each TSV so a failed batch resumes, and emits both
-`features.csv` and `gene_metadata.csv`. **`app.py` is still the only real stub** — a docstring and a
-`TODO(UI owner)`, no upload screen, no results dashboard, no call into `explainer.py`. **`models/`
-is still empty and nothing in `src/` serializes a model**; see "Known gaps to fix".
+`features.csv` and `gene_metadata.csv`. **`app.py` is now built** — the "clinical console" redesign:
+upload + bundled-example picker, per-antibiotic cards with evidence tiers, KPI row, GPT summary.
+**`models/` is still empty and nothing in `src/` serializes a model**, so the app fits on startup
+(~0.9 s, cached with `st.cache_resource`); see "Known gaps to fix".
 
-Test suite: 118 tests, all passing (`python -m pytest tests/ -q`).
+Test suite: 129 tests, all passing (`python -m pytest tests/ -q`).
 
 Labels live in `data/` (E. coli taxon 562). `labels_sampled.csv` is the working set: 2,400 rows,
 columns `genome_id,genome_name,antibiotic,phenotype,lab_method` — filter on `lab_method` to keep
@@ -225,7 +226,7 @@ then `run_full_evaluation(Path("data/processed"), Path("reports_real_scaled"))`.
 
 | drug | n_test | coverage | bal_acc | recall_R | recall_S | AUROC | PR-AUC | brier raw → cal |
 |---|---|---|---|---|---|---|---|---|
-| Ampicillin | 375 | 91.5 ±1.4 | 0.930 ±0.010 | 0.923 ±0.015 | 0.939 ±0.015 | 0.947 ±0.008 | 0.961 ±0.006 | 0.084 → 0.074 |
+| Ampicillin | 375 | 95.0 ±1.7 | 0.939 ±0.006 | 0.913 ±0.014 | 0.966 ±0.005 | 0.948 ±0.009 | 0.963 ±0.006 | 0.069 → 0.065 |
 | Ciprofloxacin | 384 | 84.4 ±2.5 | 0.853 ±0.011 | 0.760 ±0.030 | 0.946 ±0.010 | 0.908 ±0.004 | 0.773 ±0.017 | 0.116 → 0.102 |
 | Trimethoprim | 174 | 85.1 ±1.6 | 0.915 ±0.019 | 0.881 ±0.037 | 0.948 ±0.006 | 0.935 ±0.007 | 0.904 ±0.017 | 0.094 → 0.096 |
 
@@ -284,6 +285,21 @@ and here is why" is a stronger position than a number that breaks under question
 ### Decisions made (don't silently reverse)
 
 - Positive class y=1 is RESISTANT ("likely to fail"). Resistance is the event being detected.
+- **Displayed confidence is clamped to [1%, 99%] — display ONLY, the math is untouched.**
+  `explainer._display_confidence()` and the card label in `app.py`. Why: Platt returns 0.9999998 for
+  ampicillin on a strong single-gene genome, and `{p:.0%}` rendered that as a flat **"100%"** in both
+  the card and the prose ("assigns 100% probability of resistance"). A calibrated research prototype
+  may never print 100%. The fit rests on 131–288 held-out rows, which cannot resolve probability past
+  ~2 significant figures, so the extra digits were false precision. Clamping errs toward
+  *understating* confidence, the safe direction here.
+  - **Do NOT "fix" this by clamping the Platt slope instead.** The slopes (1.86 / 1.27 / 1.16) are a
+    clean fit on genuinely held-out rows — `n_calibration` equals the calibration split size exactly
+    for all three drugs, all far above `MIN_CALIBRATION_ROWS = 40`, so the OOF-augmentation branch
+    never fires on the scaled data and the over-sharpening warning in `calibration.py` does not apply.
+    The slope is doing real work (ampicillin Brier 0.084 → 0.074). Constraining it would reverse a
+    correct recalibration to fix a rendering bug, and would put
+    `test_calibration_improves_brier_on_held_out_test` at risk.
+  - Nothing downstream consumes the clamped value — no metric, no threshold, no report.
 - **Mash threshold 0.02 (~98% ANI)**, still deliberately over-merging. Was 0.05 (~95% ANI, the
   *species* boundary), which does not survive single-species data: a quarter of all real E. coli
   pairs sit below 0.05, so single-linkage chained 118 of 119 genomes into ONE cluster and no
@@ -418,7 +434,7 @@ and here is why" is a stronger position than a number that breaks under question
   public BV-BRC Data API — **119 → 2,127 genomes, 3 → 444 MLST clusters** — with no
   AMRFinderPlus, no Docker and no FASTA download, and caches responses per batch. THE
   binding constraint is gone: test slices went from 9–11 rows to 174–384, and the standard
-  deviations collapsed (Ampicillin bal_acc 0.500 → 0.930 ±0.010, Trimethoprim 0.700 →
+  deviations collapsed (Ampicillin bal_acc 0.500 → 0.939 ±0.006, Trimethoprim 0.700 →
   0.915 ±0.019). See `docs/BVBRC_DATA.md` and `reports_real_scaled/`.
 - **`fetch_bvbrc._feature_token()` destroys two gene symbols.** Owner: Omar / Hazem — do not
   fix from the pipeline branch. Measured against the live API over 400 genomes:
@@ -443,13 +459,22 @@ and here is why" is a stronger position than a number that breaks under question
   substitution was not measured the way the Mash threshold was. These fail in OPPOSITE
   directions: Mash single-linkage errs toward merging (safe — over-merging cannot leak),
   MLST errs toward splitting, because single-locus variants get distinct ST numbers and can
-  land on both sides of a split. The scaled leakage gaps are ≈0 (−0.001 / −0.012 / −0.030),
+  land on both sides of a split. The scaled leakage gaps are ≈0 (−0.001 / −0.001 / −0.030),
   which is consistent with genuinely low redundancy but ALSO with ST failing to separate
   near-identical genomes. Worth one measurement — cluster the 119-genome FASTA set both ways
   and check whether ST splits any Mash cluster — before defending the grouped-split claim.
-- **AMRFinderPlus is not installed in this environment** and Docker's daemon is not running. The
-  119-genome matrix came from Moncef's machine. Anyone scaling the dataset needs the toolchain
-  working locally first — validate on ~5 genomes before committing to a full run.
+- ~~AMRFinderPlus is not installed and Docker's daemon is not running.~~ **Resolved for the demo
+  path, 2026-07-19.** `amrfinder` is still NOT on the host PATH, but the Docker image bakes
+  AMRFinderPlus **4.2.7** + AMR database **2026-05-15.1**, so the live upload path works *inside
+  the container* and nowhere else. Measured: a FASTA with no cached TSV annotates end to end in
+  **19 s**. Two traps for anyone testing it:
+  - `genome_reader.run_amrfinder` returns a cache hit **before** it checks for the binary, so a
+    bundled example succeeds natively via its committed `.amrfinder.tsv` and creates a false
+    impression that the live path works. It does not. Test in a fresh directory.
+  - `docker exec` bypasses micromamba's entrypoint, so `amrfinder` reports "not found" even
+    though PID 1 has it. Use `docker exec <id> /usr/local/bin/_entrypoint.sh <cmd>`.
+  Anyone scaling the dataset still needs the toolchain working locally — validate on ~5 genomes
+  before committing to a full run.
 - ~~`grouped_split()` balances cluster size, not label.~~ **Fixed.** The allocator now sends each
   cluster to the split furthest behind on its per-class targets, weighted by the cluster's own
   class mix. Ciprofloxacin went from 40/35/70 to 45.4/44.9/45.7 percent resistant across
@@ -473,6 +498,29 @@ and here is why" is a stronger position than a number that breaks under question
 - **`genome_reader.check_target_gate()` is deprecated dead code** with two bugs (title-case drug
   keys that never match the lowercase labels, and no `"unknown"` branch so an unseen genome falls
   through to `"present"`). `predictor.target_gate()` is the real one. Do not wire the other up.
+
+## Running the demo (verified end to end 2026-07-19)
+
+**Docker is the demo vehicle.** Natively you get bundled examples only — the live upload path needs
+`amrfinder`, which exists only in the image.
+
+```
+docker build -t genome-firewall .
+docker run -d -p 8501:8501 -e OPENAI_API_KEY=sk-... --name gf-demo genome-firewall
+```
+
+Source is **baked** (`COPY . /app`, `Mounts: []`) — every code change needs a rebuild, and the
+rebuild is fast because the micromamba/`amrfinder -u` layers are cached. **Commit before building**:
+`COPY` bakes the working tree, so an uncommitted demo is one you cannot roll back to. Tag the
+previous image (`docker tag genome-firewall:latest genome-firewall:rollback`) and verify a new build
+on a spare port before cutting 8501 over.
+
+Lead with **`562.7624.fna`** — the only bundled genome that returns all three verdicts
+(fail / work / no-call) and both evidence tiers, so the no-call is visible on screen. The other three
+examples return `likely_to_fail` for all three drugs.
+
+Live-upload timing: ~19 s for a 5 Mb assembly. GPT explanations degrade to deterministic templates on
+any API error, bounded at `timeout=8.0, max_retries=1`.
 
 ## Team roles and file ownership
 
@@ -542,12 +590,17 @@ team agreement (Hazem's file, everyone depends on it) — raise it, don't patch 
   appear on synthetic demo data.
 - **Don't render evidence tier as a confidence signal.** `statistical_association` is a *category*,
   not a weaker probability. Keep the calibrated number and the evidence tier visually separate.
-- **Ciprofloxacin currently has no known-gene evidence on the scaled dataset**, so every
-  ciprofloxacin card will read `statistical_association`. That is the `_feature_token()` bug in
-  "Known gaps", not something to paper over in the UI.
+- **Ciprofloxacin's evidence depends on which path you are on — this was measured wrong before.**
+  On the BATCH/evaluation path (`predictor.py` + `drug_database`) it has no known-gene evidence on
+  the scaled dataset, per the `_feature_token()` bug in "Known gaps". But on the LIVE FASTA path the
+  app actually runs, `fasta_pipeline._upgrade_evidence()` + `KNOWN_CAUSAL_FAMILIES["Ciprofloxacin"]
+  = {"AAC-Ib-cr"}` promotes it, so cards DO read `known_gene_or_mutation` backed by `AAC-Ib-cr`.
+  (Ironically the tokeniser bug is what produces that column: `AAC(6')-Ib-cr` -> parenthetical
+  stripped -> `AAC-Ib-cr`.) Verified on all four bundled demo genomes. Do not "fix" the UI to
+  hide evidence that is really there.
 
 **Show the no-call properly.** `no_call` is a real, designed outcome with `no_call_reason` filled
-in, not an error state — around 9–16% of predictions on the scaled data. A judge looking for
+in, not an error state — around 5–16% of predictions on the scaled data. A judge looking for
 honest uncertainty handling will look for exactly this, so give it a first-class card, not a
 greyed-out row.
 
