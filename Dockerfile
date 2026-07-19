@@ -20,8 +20,14 @@ RUN micromamba install -y -n base -c conda-forge -c bioconda \
         ncbi-amrfinderplus=4.2.7 \
     && micromamba clean --all --yes
 
-# Activate the env for the remaining RUN/CMD steps so `amrfinder`/`pip` are found.
+# Activate the env for the remaining RUN steps so `amrfinder`/`pip` are found.
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
+
+# Put the conda env on PATH for EVERY process at runtime — not just steps that go
+# through micromamba's activation entrypoint. Without this, Streamlit can start
+# (via the entrypoint) yet its `amrfinder` subprocess inherits a PATH without
+# /opt/conda/bin and fails with "amrfinder not found on PATH".
+ENV PATH=/opt/conda/bin:$PATH
 
 # Python deps for the app.
 COPY --chown=$MAMBA_USER:$MAMBA_USER requirements.txt /tmp/requirements.txt
