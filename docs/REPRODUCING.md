@@ -34,7 +34,7 @@ names (`aac(6')-Ib-cr` vs `aac(6')-Ib-cr5`) align silently and wrongly.
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/ -q          # 118 tests, no API key needed
+python -m pytest tests/ -q          # 129 tests, no API key needed
 ```
 
 An OpenAI key is only needed for `explainer.py`. Nothing in the reproduction

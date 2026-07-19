@@ -1,4 +1,4 @@
 drug,random,random_sd,grouped,grouped_sd,gap
+Ampicillin,0.932,0.011,0.933,0.006,-0.001
 Trimethoprim,0.883,0.022,0.884,0.022,-0.001
-Ampicillin,0.898,0.017,0.91,0.01,-0.012
 Ciprofloxacin,0.811,0.018,0.841,0.014,-0.03

@@ -326,10 +326,12 @@ def leakage_comparison(
     """
     Balanced accuracy under a random row split vs a grouped split, per drug.
 
-    This is the pitch, and it must be reported honestly: average over several
+    This is a leakage check, and it must be reported honestly: average over several
     seeds, because a single-seed gap swings by +/-0.05. A positive gap means the
     random split was inflated by near-identical genomes spanning train and test.
     A gap near zero means that drug's signal did not depend on leakage — say so
+    (that is the case on this BV-BRC collection: gaps are ~0, so grouping is a
+    passed safety check here, not a score boost)
     rather than quietly dropping the drug from the table.
     """
     from predictor import fit_drug_model
@@ -494,7 +496,7 @@ def plot_dashboard(
         ax.set_ylim(0, 1.12)
         ax.axhline(0.5, color="k", ls=":", lw=1)
         ax.set_ylabel("balanced accuracy")
-        ax.set_title("(d) Why grouped splitting matters (mean ± sd over seeds)")
+        ax.set_title("(d) Grouped vs random split — leakage check (mean ± sd over seeds)")
         ax.legend(fontsize=8, loc="lower right")
     else:
         ax.axis("off")

@@ -55,7 +55,12 @@ KNOWN_CAUSAL_FAMILIES: dict[str, set[str]] = {
         "CMY/CMY-2/CFE/LAT", "CMY-1/MOX", "DHA/MOR",
         "KPC", "NDM", "VIM", "IMP", "GES", "VEB", "CARB/PSE",
     },
-    "Ciprofloxacin": {"Quinolone", "AAC-Ib-cr", "gyrA_1"},
+    # NOTE: "Quinolone" (the acquired qnr family) is deliberately NOT here. The
+    # bridge routes gyrA/parC TARGET mutations onto that column, and calling a
+    # chromosomal QRDR mutation a "known qnr determinant" would be mechanism
+    # conflation. Only a genuine acquired fluoroquinolone-acetylating gene counts
+    # as a known determinant here; everything else stays statistical_association.
+    "Ciprofloxacin": {"AAC-Ib-cr"},
     "Trimethoprim": {"dhfrI", "dhfrV", "dfrA", "dfrD", "dfrA12"},
 }
 

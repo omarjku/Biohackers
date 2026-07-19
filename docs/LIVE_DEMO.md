@@ -52,6 +52,13 @@ amrfinder -u                     # install the AMR database to the default locat
 pip install -r requirements.txt  # ML + Streamlit deps in the same env
 ```
 
+Build the model data (writes `data/processed/`, which is gitignored — the app's
+first prediction needs it, else it errors):
+
+```bash
+python src/fetch_bvbrc.py         # pulls the 2,154-genome dataset from BV-BRC
+```
+
 Run the app (from that env, so amrfinder is on PATH):
 
 ```bash

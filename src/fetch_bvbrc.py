@@ -24,9 +24,10 @@ install, no FASTA download):
                 far better cluster_id than within-species Mash (splits.py already
                 documents that E. coli Mash distances barely separate strains)
 
-Output is data/processed/{features,labels,genomes}.csv + drug_targets.json +
-gene_metadata.csv — byte-for-byte what data_io.load_dataset() validates, so
-predictor / calibration / evaluation consume it unchanged.
+Output is data/processed/{features,labels,genomes}.csv + drug_targets.json — the
+exact four files data_io.load_dataset() validates, so predictor / calibration /
+evaluation consume them unchanged. A gene_metadata.csv is also emitted as an
+annotation reference (feature -> AMR class); it is not read by data_io.
 
 Two honest limitations, documented here because they are the reason for the design
 and because the brief rewards stating them:
@@ -232,8 +233,9 @@ def fetch_features(ids: list[str], cache_dir: Path = CACHE_DIR) -> tuple[pd.Data
 
     features: binary genome_id x gene-family matrix (only genomes with >=1
     acquired gene appear; build() adds all-zero rows for the rest).
-    gene_metadata: feature_name -> amr_class + evidence_type, for the explainer's
-    evidence tiering (every NDARO acquired gene is a known mechanism).
+    gene_metadata: feature_name -> amr_class + evidence_type, emitted as an
+    annotation reference (not consumed by data_io; evidence tiering is driven by
+    drug_database.KNOWN_RESISTANCE_GENES / fasta_pipeline.KNOWN_CAUSAL_FAMILIES).
     """
     rows = _fetch_over_ids(
         "sp_gene",

@@ -245,10 +245,10 @@ def grouped_split(
 
     # Largest clusters first: place the constrained items while there is still
     # room to place them.
+    # Largest clusters first, with size ties broken randomly so the split is not
+    # an artefact of cluster naming.
     rng = np.random.default_rng(seed)
-    order = sorted(members, key=lambda g: (-len(members[g]), g))
-    # Break size ties randomly so the split is not an artefact of cluster naming.
-    order = sorted(order, key=lambda g: (-len(members[g]), rng.random()))
+    order = sorted(members, key=lambda g: (-len(members[g]), rng.random()))
 
     if y is None:
         # No labels supplied — balance row counts only.

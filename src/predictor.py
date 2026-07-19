@@ -708,7 +708,13 @@ class Predictor:
             drivers = [
                 name
                 for name in model.positive_drivers(row)
+                # Exclude on the gene STEM too: the NDARO matrix names target genes
+                # as numbered columns (folA_2, gyrA_1) with no bare 'folA'/'gyrA'
+                # column, so a raw-string match alone never excludes them and
+                # e.g. folA surfaces as evidence for Ampicillin. Stem match fixes
+                # that; the exact match still catches CURATED_COUNT.
                 if name not in model.evidence_exclusions
+                and name.split("_")[0] not in model.evidence_exclusions
             ][:MAX_STATISTICAL_FEATURES]
             if drivers:
                 evidence = "statistical_association"
