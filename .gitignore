@@ -22,3 +22,8 @@ fasta_genomes_used.zip
 .DS_Store
 venv/
 .venv/
+# Local agent-tooling artifacts (RTK / ruvector) — never part of the project.
+ruvector.db
+agentdb.rvf
+*.rvf
+*.rvf.lock

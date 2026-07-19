@@ -8,16 +8,20 @@ Output: an ExplanationResult — consumed by app.py
 Two paths:
   1. template_explain()  -> deterministic, free, zero API risk. Always works.
   2. llm_explain()       -> GPT-4 rephrases the template into clinician-readable
-                            prose. Constrained to only the fields already in
-                            the Prediction — it cannot invent gene names or
-                            claims that aren't in supporting_features.
+                            prose. The system prompt forbids inventing genes, and
+                            the frontend report path (report_item, use_llm) runs a
+                            post-hoc guard (_contains_unlisted_gene) that rejects
+                            LLM output naming an AMR gene absent from
+                            supporting_features and falls back to the template.
 
-explain() tries the LLM path and falls back to the template on any failure
-(timeout, rate limit, no credits left). This is the hedge against the shared
-$50 OpenAI credit running out mid-demo.
+The LIVE APP calls explain_report with use_llm=False, so the deterministic
+template path is what ships by default; the LLM is an optional enhancement.
+explain()/report_item() fall back to the template on any failure (timeout, rate
+limit, no credits), hedging the shared $50 OpenAI credit running out mid-demo.
 """
 
 import os
+import re
 from schemas import Prediction, ExplanationResult
 
 DISCLAIMER = (
@@ -198,7 +202,11 @@ def _markers(pred: Prediction) -> tuple[str, str]:
     if pred.supporting_features:
         genes = [f.gene + (f" {f.mutation}" if f.mutation else "") for f in pred.supporting_features]
         return "; ".join(genes[:3]), locus
-    return "Wild-Type", locus
+    # No determinant found. We say "None detected", NOT "Wild-Type": AMRFinderPlus
+    # only reports an essential target gene when it is altered, so we never
+    # confirmed an intact/wild-type copy — absence of a call is not a positive
+    # wild-type observation.
+    return "None detected", locus
 
 
 def _bio_stat_text(pred: Prediction) -> tuple[str, str]:
@@ -227,9 +235,11 @@ def _bio_stat_text(pred: Prediction) -> tuple[str, str]:
         return (
             f"Evidence for {drug} is inconclusive, so no confident biological "
             f"interpretation is made. {reason}",
-            f"The calibrated resistance probability ({conf:.0%}) does not clear the "
-            "no-call margin, or the genome is unlike the training data — a safe "
-            "prediction cannot be computed.",
+            # Use the actual gate reason rather than a generic dual-reason line —
+            # an out-of-distribution no-call can have a high probability, and
+            # asserting it "does not clear the no-call margin" would contradict the
+            # number shown.
+            f"A safe prediction cannot be computed for this genome. {reason}",
         )
 
     if pred.call == "likely_to_fail":
@@ -250,8 +260,10 @@ def _bio_stat_text(pred: Prediction) -> tuple[str, str]:
     # likely_to_work
     if pred.evidence_category == "no_known_signal":
         return (
-            f"No known {klass} resistance genes or mutations were found, and the "
-            f"drug target ({locus}) appears intact (wild-type).",
+            f"No known {klass} resistance determinant was detected in this genome. "
+            f"(Note: the annotator reports the {locus} target only when it is "
+            "altered, so this is absence of a resistance signal, not a confirmed "
+            "intact target.)",
             f"Calibrated susceptibility confidence is {1 - conf:.0%}; the genomic "
             "profile sits within the susceptible range seen in training.",
         )
@@ -317,14 +329,28 @@ def _llm_refine_report(pred: Prediction, bio: str, stat: str) -> tuple[str, str]
         return bio, stat
 
 
-def _contains_unlisted_gene(pred: Prediction, text: str) -> bool:
-    """True if text mentions a gene-looking token absent from supporting_features."""
-    import re
+#: Broad AMR-gene token detector: bla-enzymes, named beta-lactamase families
+#: (CTX-M, NDM, KPC, OXA, VIM, IMP, SHV, TEM, CMY, GES, VEB), and the common
+#: acquired-gene stems (aac/aad/aph/ant, sul, dfr/dhfr, tet, mph, erm, qnr, cat,
+#: mcr, fosA), each optionally with an allele suffix. Catches the families the
+#: old regex missed (a hallucinated "NDM-1"/"KPC-3"/"OXA-48" now trips the guard).
+_AMR_TOKEN = re.compile(
+    r"\b(?:bla[A-Za-z0-9\-]+"
+    r"|(?:CTX-M|NDM|KPC|OXA|VIM|IMP|SHV|TEM|CMY|GES|VEB|DHA|PSE|CARB|MOX)(?:-?\d+)?"
+    r"|(?:aac|aad|aph|ant|sul|dfr|dhfr|tet|mph|erm|qnr|cat|mcr|fos|arr|aadA|strA|strB)"
+    r"[A-Za-z0-9()'\-]*"
+    r"|gyrA|parC|parE|gyrB)\b",
+    re.IGNORECASE,
+)
 
+
+def _contains_unlisted_gene(pred: Prediction, text: str) -> bool:
+    """True if text names an AMR gene token absent from supporting_features."""
     allowed = {f.gene.lower() for f in pred.supporting_features}
     allowed |= {DRUG_LOCUS.get(pred.drug, "").lower()}
-    for tok in re.findall(r"\b(?:bla[A-Za-z0-9-]+|[a-z]{2,4}A\d*|gyrA|parC|sul\d|dfrA\d*)\b", text):
-        if tok.lower() not in allowed and not any(tok.lower() in a for a in allowed):
+    for tok in _AMR_TOKEN.findall(text):
+        t = tok.lower()
+        if t not in allowed and not any(t in a or a in t for a in allowed if a):
             return True
     return False
 
