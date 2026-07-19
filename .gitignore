@@ -6,6 +6,10 @@ models/*.joblib
 models/*.pkl
 data/raw/*
 !data/raw/.gitkeep
+data/processed/
+# Genome FASTA bundles: 187 MB compressed, over GitHub's 100 MB per-file limit.
+fasta_genomes_used.zip
+*.fna
 .DS_Store
 venv/
 .venv/

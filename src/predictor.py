@@ -54,8 +54,25 @@ DEFAULT_C = 0.1
 # This is a UI budget, not a statistical threshold.
 MAX_STATISTICAL_FEATURES = 3
 
-# Feature names encode point mutations as GENE_SUBSTITUTION, e.g. "gyrA_S83L".
-_MUTATION_PATTERN = re.compile(r"^(?P<gene>.+?)_(?P<mutation>[A-Z]\d+[A-Z])$")
+# Feature names encode point mutations as GENE_CHANGE, e.g. "gyrA_S83L".
+#
+# The change token is wider than a plain substitution. Real AMRFinderPlus output
+# for E. coli also uses stops ("cirA_Q56Ter"), frameshifts ("acrR_V29YfsTer44"),
+# in-frame insertions ("ftsI_I336IKYRI"), and promoter positions that are
+# negative and nucleotide-level ("ampC_T-32A", "blaTEMp_C32T"). So the token is
+# an uppercase letter, an optionally-negative position, then any trailing
+# letters/digits.
+#
+# The earlier pattern was `[A-Z]\d+[A-Z]` — substitutions only. It silently
+# failed to split 20 of the 41 mutation features in the real matrix, leaving
+# gene="cirA_Q56Ter" with mutation=None. That is not just cosmetic: evidence
+# exclusions and KNOWN_RESISTANCE_GENES both match on the parsed gene name, so
+# an unsplit feature is never recognised as belonging to its gene.
+#
+# Verified against all 124 real features: 41/41 mutations split correctly and
+# none of the 83 acquired gene names are falsely split. Pinned by
+# tests/test_predictor.py.
+_MUTATION_PATTERN = re.compile(r"^(?P<gene>.+?)_(?P<mutation>[A-Z]-?\d+[A-Za-z0-9]*)$")
 
 
 class PredictorError(ValueError):

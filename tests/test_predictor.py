@@ -262,3 +262,54 @@ def test_every_prediction_validates_against_the_schema(dataset, predictor):
         )
         assert 0.0 <= prediction.confidence <= 1.0
         assert prediction.target_gate_status in ("present", "absent", "unknown")
+
+
+class TestMutationNameParsing:
+    """
+    Feature-name parsing against real AMRFinderPlus E. coli nomenclature.
+
+    The original pattern handled plain substitutions only and silently failed to
+    split 20 of the 41 mutation features in the real matrix, leaving
+    gene="cirA_Q56Ter" with mutation=None. Evidence exclusions and
+    KNOWN_RESISTANCE_GENES both match on the parsed gene name, so an unsplit
+    feature is never recognised as belonging to its gene.
+
+    Every name below is taken from data/raw/files.zip, not invented.
+    """
+
+    @pytest.mark.parametrize(
+        "feature, gene, mutation",
+        [
+            ("gyrA_S83L", "gyrA", "S83L"),            # substitution
+            ("parC_S80I", "parC", "S80I"),
+            ("cirA_Q56Ter", "cirA", "Q56Ter"),        # nonsense / stop
+            ("ompC_Q104Ter", "ompC", "Q104Ter"),
+            ("acrR_V29YfsTer44", "acrR", "V29YfsTer44"),   # frameshift
+            ("nfsA_L43CfsTer18", "nfsA", "L43CfsTer18"),
+            ("ftsI_I336IKYRI", "ftsI", "I336IKYRI"),  # in-frame insertion
+            ("ampC_T-32A", "ampC", "T-32A"),          # negative promoter position
+            ("blaTEMp_C32T", "blaTEMp", "C32T"),      # promoter, nucleotide-level
+        ],
+    )
+    def test_real_mutation_names_split(self, feature, gene, mutation):
+        from predictor import _parse_feature_name
+
+        assert _parse_feature_name(feature) == (gene, mutation)
+
+    @pytest.mark.parametrize(
+        "feature",
+        [
+            "blaTEM-1",
+            "blaCTX-M-15",
+            "aac(6')-Ib-cr5",
+            "aph(3'')-Ib",
+            "dfrA17",
+            "qnrS1",
+        ],
+    )
+    def test_acquired_gene_names_are_never_split(self, feature):
+        """An acquired gene has no mutation component — splitting one would
+        invent a mutation that AMRFinderPlus never reported."""
+        from predictor import _parse_feature_name
+
+        assert _parse_feature_name(feature) == (feature, None)
