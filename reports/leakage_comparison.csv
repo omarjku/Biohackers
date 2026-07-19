@@ -1,0 +1,5 @@
+drug,random,random_sd,grouped,grouped_sd,gap
+Meropenem,0.77,0.066,0.676,0.039,0.094
+Ciprofloxacin,0.902,0.03,0.842,0.049,0.06
+Gentamicin,0.946,0.025,0.887,0.035,0.059
+Ceftriaxone,0.934,0.028,0.911,0.014,0.023
