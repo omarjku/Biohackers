@@ -42,6 +42,50 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MODEL_DATA_DIR = REPO_ROOT / "data" / "processed"
 SPECIES = "Escherichia coli"
 
+# A finished E. coli assembly is ~4.5-5.5 Mb. Anything far below this is a gene,
+# an amplicon (e.g. a 16S rRNA sequence, ~1.5 kb), or a truncated file — NOT a
+# whole genome. Scoring it is unsafe: with no AMR genes found, an empty feature
+# vector looks identical to a genuinely susceptible genome, so the model returns
+# a confident (and wrong) "likely to work". QC lets the app warn before that.
+GENOME_MIN_BP = 1_000_000
+
+
+def genome_qc(fasta_path: str | Path) -> dict:
+    """
+    Cheap structural sanity check on an uploaded FASTA (no annotation needed).
+    Returns {total_bp, n_contigs, plausible_genome, message}.
+    """
+    fasta_path = Path(fasta_path)
+    total_bp = 0
+    n_contigs = 0
+    with fasta_path.open() as fh:
+        for line in fh:
+            if line.startswith(">"):
+                n_contigs += 1
+            else:
+                total_bp += len(line.strip())
+
+    plausible = total_bp >= GENOME_MIN_BP and n_contigs > 0
+    if plausible:
+        message = ""
+    elif n_contigs == 0:
+        message = "No FASTA sequence records were found in this file."
+    else:
+        message = (
+            f"This file is only {total_bp:,} bp across {n_contigs} record(s) — "
+            f"that is a gene or partial sequence, not a whole-genome assembly "
+            f"(E. coli genomes are ~4.5-5.5 Mb). Any prediction below is unreliable: "
+            f"with no genome to scan, an absence of resistance genes is "
+            f"indistinguishable from a truly susceptible strain. Upload a complete "
+            f"E. coli assembly for a trustworthy result."
+        )
+    return {
+        "total_bp": total_bp,
+        "n_contigs": n_contigs,
+        "plausible_genome": plausible,
+        "message": message,
+    }
+
 # Curated causal AMR families, in the model's NDARO vocabulary. drug_database.py
 # KNOWN_RESISTANCE_GENES is Moncef's, keyed by AMRFinderPlus names — those never
 # match the NDARO family tokens the model trained on, so the predictor labels even

@@ -1,0 +1,10 @@
+# Pin the app to the light theme. The UI is designed light (light background,
+# dark text); without this, a viewer whose OS/browser is in dark mode gets
+# Streamlit's light-on-light default text and the titles/markdown look faint
+# ("translucent"). base="light" makes text render dark for everyone.
+[theme]
+base = "light"
+backgroundColor = "#f6f7f9"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1e293b"
+primaryColor = "#4f46e5"

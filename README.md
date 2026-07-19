@@ -56,14 +56,50 @@ flag it to the team before editing.
 Held-out performance (8 grouped MLST splits, 2,127 genomes): Ampicillin
 bal-acc 0.94 · Ciprofloxacin 0.85 · Trimethoprim 0.92. See `reports_real_scaled/`.
 
-## Run the demo
+## Quick start (Docker — recommended)
+
+Clone, add an OpenAI key, build, run. AMRFinderPlus **and its database are baked
+into the image**, and the trained model data ships in the repo — so an uploaded
+FASTA is annotated and scored with no host setup.
 
 ```bash
-# one-time env (AMRFinderPlus + deps) and model-data build — see docs/LIVE_DEMO.md
-streamlit run src/app.py     # upload a FASTA -> per-antibiotic report
+git clone https://github.com/omarjku/Biohackers.git
+cd Biohackers
+
+# 1. OpenAI key for AI-written explanations (optional — falls back to built-in text)
+cp .env.example .env
+#    then edit .env:  OPENAI_API_KEY=sk-...your-real-key...
+
+# 2. Build the image (first build ~10–20 min: downloads the AMR database once)
+docker build -t genome-firewall .
+
+# 3. Run — --env-file passes your key into the container
+docker run --rm -p 8501:8501 --env-file .env genome-firewall
 ```
 
-`docs/LIVE_DEMO.md` covers the AMRFinderPlus conda env and building `data/processed`.
+Open **http://localhost:8501**, then either **upload a whole-genome *E. coli*
+FASTA (~5 Mb)** or pick a **bundled example** in the sidebar. AI explanations are
+on by default (they use the key from `.env`; without a key the app uses built-in
+deterministic explanations, so it always works).
+
+- Apple Silicon, if the build fails on the AMRFinderPlus step:
+  `docker build --platform=linux/amd64 -t genome-firewall .`
+- Public short URL for a live demo (second terminal, no signup):
+  `cloudflared tunnel --url http://localhost:8501`
+
+Full walkthrough + troubleshooting table: [`docs/DEMO_SETUP.md`](docs/DEMO_SETUP.md).
+
+## Run without Docker (examples only)
+
+The model data ships in the repo, so **bundled examples** run with just Python.
+Uploading a *new* FASTA this way additionally needs AMRFinderPlus on PATH
+(see [`docs/LIVE_DEMO.md`](docs/LIVE_DEMO.md)).
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env          # optional OpenAI key
+streamlit run src/app.py
+```
 
 ## Setup (tests / development)
 
