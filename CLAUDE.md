@@ -53,6 +53,7 @@ Actual layout (as of 2026-07-19; paths are relative to this file's directory, `*
     processed/                  # the four contract files, built by adapt_real_data.py (gitignored)
     synthetic/                  # seeded fixtures (seed=7): features/labels/genomes/drug_targets
   docs/DATA_CONTRACT.md   # column contract data_io.py validates against
+  docs/REPRODUCING.md     # clone -> numbers runbook; what ships and what doesn't
   src/
     schemas.py            # Prediction / ExplanationResult dataclasses — the shared contract
     data_io.py            # contract loader + validation
@@ -298,6 +299,29 @@ and here is why" is a stronger position than a number that breaks under question
   - The counted genes are stored on `DrugModel.counted_genes` so `probability_resistant()` can
     rebuild the column for a single raw genome row at inference time. A raw feature row does not
     carry it.
+- **Curated genes are resolved to feature columns, not matched by exact name**
+  (`predictor.resolve_curated_genes()`, added 2026-07-19). The curated lists are written in
+  AMRFinderPlus ALLELE symbols (`blaTEM-1`, `dfrA17`); a matrix built from BV-BRC
+  `sp_gene`/NDARO carries GENE-FAMILY tokens (`TEM`, `dfrA`). Measured against the live API:
+  under exact matching only **2 of 51** curated genes resolved on the NDARO vocabulary
+  (Ampicillin 1/25, Ciprofloxacin 0/18, Trimethoprim 1/8). After resolution: **28 of 51**
+  (20/25, 0/18, 8/8).
+  - Why it mattered: `known_present` empty means every call reports
+    `statistical_association`, and the curated count degenerates to a single-gene
+    indicator. **Nothing raises and the metrics look fine** — Ampicillin still scored 0.93
+    because `blaTEM` alone predicts ampicillin well at n=375. The evidence layer was
+    hollow while the dashboard was green.
+  - Order: exact match first (so an AMRFinderPlus matrix is byte-for-byte unchanged — the
+    real-data `reports_real/` regenerate identical), then the normalised family stem.
+  - **Mutation-form entries never fall back to their bare gene.** `gyrA_S83L` resolving onto
+    a `gyrA` column would assert a point mutation nobody observed. They resolve to nothing
+    and the drug honestly loses that evidence.
+  - `DrugModel.known_genes` now holds FEATURE COLUMNS, not curated gene names. Reporting
+    "blaTEM-1 detected" off a `TEM` column would claim an allele identification the
+    annotator never made.
+  - `warn_if_evidence_unavailable()` warns when a drug has curated genes but none resolve —
+    "no expressible evidence" and "no known biology" look identical downstream and mean
+    opposite things.
 - **Gene-family aggregation is available but OFF** (`fit_drug_model(aggregate_families=False)`).
   Collapsing allelic variants (`blaTEM-1/-12/-30` → `blaTEM`) is biologically sound and widens
   probability spread, but measured end-to-end it helps Trimethoprim on every metric and hurts the
@@ -349,6 +373,49 @@ and here is why" is a stronger position than a number that breaks under question
     prevent hallucinated biology. Owner: Hazem.
   - Meropenem has no target genes, so it is never gated (`target_gate_status="unknown"`). Synthetic
     drug only, so it does not touch the real-data results. Owner: Moncef.
+- ~~A fresh clone could not reproduce the real numbers.~~ **Fixed 2026-07-19.**
+  `data/raw/genome_clusters_mash.csv` (102 clusters) was gitignored and untracked, and
+  `adapt_real_data.py` falls back *silently* to `genome_clusters.csv` (3 clusters, 60/58/1)
+  when it is missing — so a clone completed the run and produced numbers that were not the
+  ones we report. `.gitignore` now carries explicit exceptions for `files.zip` and both
+  cluster files, and `docs/REPRODUCING.md` is the runbook. Note the reproducible boundary is
+  `files.zip`, NOT the FASTAs: everything downstream of AMRFinderPlus reproduces exactly from
+  a clone, but regenerating `files.zip` itself needs the 187 MB FASTA bundle (over GitHub's
+  per-file limit) and a working annotator. Nobody has run that path on a clean machine.
+- ~~No BV-BRC download script.~~ **Done by Omar, 2026-07-19** (`0d54ced`, merged to
+  `origin/main` as `a554390`). `src/fetch_bvbrc.py` pulls the full 2,154-id set from the
+  public BV-BRC Data API — **119 → 2,127 genomes, 3 → 444 MLST clusters** — with no
+  AMRFinderPlus, no Docker and no FASTA download, and caches responses per batch. THE
+  binding constraint is gone: test slices went from 9–11 rows to 174–384, and the standard
+  deviations collapsed (Ampicillin bal_acc 0.500 → 0.930 ±0.010, Trimethoprim 0.700 →
+  0.915 ±0.019). See `docs/BVBRC_DATA.md` and `reports_real_scaled/`.
+- **`fetch_bvbrc._feature_token()` destroys two gene symbols.** Owner: Omar / Hazem — do not
+  fix from the pipeline branch. Measured against the live API over 400 genomes:
+  - `re.sub(r"\(.*?\)", "", tok)` strips parentheticals, so `AAC(6')-Ib-cr` becomes
+    `AAC-Ib-cr` — the `(6')` that identifies the enzyme is gone.
+  - `tok.split()[0]` takes the FIRST word, so `Quinolone resistance protein QnrB10`
+    tokenises to **`Quinolone`**, collapsing qnrA/qnrB/qnrS into one meaningless column.
+  - Consequence: ciprofloxacin's five acquired curated genes (`qnrA1`, `qnrB6`, `qnrB19`,
+    `qnrS1`, `aac(6')-Ib-cr5`) resolve to **nothing**, so the drug gets zero known-gene
+    evidence. Verified this is the tokeniser and not the resolver: on the same feature set
+    with symbols preserved, ciprofloxacin produces 14 `known_gene_or_mutation` calls backed
+    by qnrS / aac(6')-Ib-cr / qnrB / qnrA. The remaining 13 curated ciprofloxacin entries
+    are point mutations and are genuinely unrecoverable from `sp_gene` — that part is
+    honest-by-construction, this part is a bug.
+- **Two disagreeing definitions of "known gene" in the repo.** `fetch_bvbrc.py` writes
+  `gene_metadata.csv` with `evidence_type="known_gene"` for EVERY NDARO feature, while
+  `predictor.py` derives evidence solely from `drug_database.KNOWN_RESISTANCE_GENES` and
+  never reads that file. The curated list should stay authoritative — NDARO's blanket label
+  would promote the efflux/porin regulators (`acrR`, `marR`, `ompC`) the team deliberately
+  excluded. Needs a decision and one of the two changed.
+- **`cluster_id` silently changed from Mash single-linkage to MLST sequence type**, and the
+  substitution was not measured the way the Mash threshold was. These fail in OPPOSITE
+  directions: Mash single-linkage errs toward merging (safe — over-merging cannot leak),
+  MLST errs toward splitting, because single-locus variants get distinct ST numbers and can
+  land on both sides of a split. The scaled leakage gaps are ≈0 (−0.001 / −0.012 / −0.030),
+  which is consistent with genuinely low redundancy but ALSO with ST failing to separate
+  near-identical genomes. Worth one measurement — cluster the 119-genome FASTA set both ways
+  and check whether ST splits any Mash cluster — before defending the grouped-split claim.
 - **AMRFinderPlus is not installed in this environment** and Docker's daemon is not running. The
   119-genome matrix came from Moncef's machine. Anyone scaling the dataset needs the toolchain
   working locally first — validate on ~5 genomes before committing to a full run.

@@ -6,6 +6,15 @@ models/*.joblib
 models/*.pkl
 data/raw/*
 !data/raw/.gitkeep
+# Small, non-regenerable inputs the real-data results depend on. The FASTAs they
+# came from are too large to ship, so without these a clone cannot reproduce
+# anything. genome_clusters_mash.csv is the one adapt_real_data.py actually uses
+# (102 clusters); genome_clusters.csv is the coarse 60/58/1 fallback and is NOT
+# usable for a grouped split. See docs/REPRODUCING.md.
+!data/raw/files.zip
+!data/raw/genome_clusters.csv
+!data/raw/genome_clusters_mash.csv
+# Derived — rebuild with `python src/adapt_real_data.py`.
 data/processed/
 # Genome FASTA bundles: 187 MB compressed, over GitHub's 100 MB per-file limit.
 fasta_genomes_used.zip

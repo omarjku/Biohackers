@@ -33,6 +33,8 @@ confidence anywhere — that is calibration.py's job.
 from __future__ import annotations
 
 import re
+import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -144,6 +146,13 @@ class DrugModel:
     estimator: LogisticRegression
     feature_names: list[str]
     target_genes: list[str] | None
+    #: FEATURE COLUMNS carrying curated resistance evidence for this drug — not
+    #: the curated gene names themselves. The two are identical on an
+    #: AMRFinderPlus matrix and differ on a family-level one, where curated
+    #: "blaTEM-1" resolves to a "TEM" column. Storing the column is what keeps
+    #: evidence honest: reporting "blaTEM-1 detected" off a "TEM" column would
+    #: claim an allele identification the annotator never made. See
+    #: resolve_curated_genes().
     known_genes: list[str] = field(default_factory=list)
     # Every drug's target genes, not just this one's. Targets are housekeeping
     # genes carried by nearly every genome, so they are near-constant columns:
@@ -265,6 +274,154 @@ def gene_family(feature_name: str) -> str:
     return _ALLELE_SUFFIX.sub("", feature_name) or feature_name
 
 
+#: A leading "bla" is a naming convention for beta-lactamases, not part of the
+#: family: AMRFinderPlus writes "blaTEM-1", BV-BRC/NDARO writes "TEM family".
+_BLA_PREFIX = re.compile(r"^bla(?=.)")
+_NON_ALNUM = re.compile(r"[^a-z0-9]")
+
+
+def _match_key(name: str) -> str:
+    """
+    Normalise a gene or feature name to a stem two vocabularies can be compared on.
+
+        "blaTEM-1" -> "tem"      "TEM family" token "TEM" -> "tem"
+        "aac(6')-Ib-cr5" -> "aac6ibcr"      "AAC(6')-Ib-cr" -> "aac6ibcr"
+
+    The `/` split handles NDARO's chained families ("CMY/CMY-2/CFE/LAT" -> CMY);
+    punctuation is dropped because the two sources disagree on it freely.
+    """
+    key = gene_family(name).casefold().split("/")[0]
+    key = _BLA_PREFIX.sub("", key) or key
+    return _NON_ALNUM.sub("", key)
+
+
+def _looks_like_symbol(word: str) -> bool:
+    """
+    Is this word a gene symbol rather than an English word?
+
+    NDARO buries some symbols in prose ("Quinolone resistance protein QnrB10"),
+    so matching has to consider individual words — but only the ones that could
+    be a symbol, or "Sulfonamide resistance protein" would offer "protein" as a
+    match key and collide with anything.
+    """
+    return any(character.isdigit() or character in "()'" for character in word)
+
+
+def _match_keys(name: str) -> set[str]:
+    """
+    Every key a FEATURE column could reasonably be matched on.
+
+    The whole string first, then any symbol-shaped word inside it — NDARO is
+    inconsistent about where the symbol sits ("AAC(6')-Ib-cr fluoroquinolone-
+    acetylating" leads with it, "Quinolone resistance protein QnrB10" ends with
+    it).
+    """
+    keys = {_match_key(name)}
+    words = name.split()
+    if len(words) > 1:
+        keys.update(_match_key(word) for word in words if _looks_like_symbol(word))
+    return {key for key in keys if key}
+
+
+def resolve_curated_genes(drug: str, columns: Iterable[str]) -> dict[str, list[str]]:
+    """
+    Map each curated resistance gene to the feature columns that represent it.
+
+    Why this is not just `gene in X.columns`: the curated lists are written in
+    AMRFinderPlus ALLELE symbols ("blaTEM-1", "dfrA17"), but a feature matrix
+    built from BV-BRC sp_gene/NDARO carries GENE-FAMILY tokens ("TEM", "dfrA").
+    Under exact matching only 2 of the 51 curated genes resolve against that
+    vocabulary — 1/25 ampicillin, 0/18 ciprofloxacin, 1/8 trimethoprim — which
+    silently empties evidence tiering (every call degrades to
+    "statistical_association") and reduces the curated count to a single-gene
+    indicator. Nothing raises, and the headline metrics look FINE, because
+    blaTEM alone predicts ampicillin well; the breakage is invisible downstream.
+
+    Resolution order:
+
+    1. Exact match wins. On an AMRFinderPlus matrix every curated gene resolves
+       exactly, so this function is a no-op there and behaviour is unchanged.
+    2. Otherwise match on the normalised family stem (see _match_key), so
+       blaTEM-1/-12/-30 all resolve to a "TEM" column.
+    3. Mutation-form entries ("gyrA_S83L", "ampC_T-32A") never fall back to
+       their bare gene. sp_gene records gene PRESENCE and cannot see point
+       mutations, so resolving gyrA_S83L onto a "gyrA" column would assert a
+       mutation nobody observed. They resolve to nothing, and the drug honestly
+       loses that evidence — see the ciprofloxacin note in fit_drug_model.
+
+    Note step 2 can widen a family: if "blaTEM" is curated but only allele
+    columns exist, every blaTEM-* column matches, including alleles not listed
+    by hand. That is biologically intended (any blaTEM hydrolyses ampicillin)
+    and cannot fire on the current AMRFinderPlus matrix, where all 51 curated
+    names already match exactly at step 1.
+    """
+    curated = _known_resistance_genes(drug)
+    if not curated:
+        return {}
+
+    columns = list(columns)
+    available = set(columns)
+    by_key: dict[str, list[str]] = {}
+    for column in columns:
+        for key in _match_keys(column):
+            by_key.setdefault(key, []).append(column)
+
+    resolved: dict[str, list[str]] = {}
+    for gene in curated:
+        if gene in available:
+            resolved[gene] = [gene]
+            continue
+        if _parse_feature_name(gene)[1] is not None:
+            continue  # mutation form — see point 3 above
+        matches = by_key.get(_match_key(gene))
+        if matches:
+            resolved[gene] = sorted(matches)
+    return resolved
+
+
+def curated_feature_columns(drug: str, columns: Iterable[str]) -> list[str]:
+    """
+    The feature columns carrying curated resistance evidence for a drug.
+
+    De-duplicated: several curated alleles collapsing onto one family column
+    must contribute ONE column, or the curated count silently re-weights toward
+    whichever family happens to have the most hand-listed alleles.
+    """
+    resolved = resolve_curated_genes(drug, columns)
+    return sorted({column for matches in resolved.values() for column in matches})
+
+
+def warn_if_evidence_unavailable(drug: str, columns: Iterable[str]) -> str | None:
+    """
+    Warn when a drug has curated genes but none of them resolve to a column.
+
+    Every prediction for that drug then reports "statistical_association" — not
+    because the biology is unknown, but because this feature source cannot
+    express it. Those two look identical downstream and mean opposite things, so
+    the difference is worth a warning rather than a silent degradation.
+
+    Live example: on a BV-BRC/NDARO matrix all 18 curated ciprofloxacin genes go
+    unresolved. Thirteen are point mutations (gyrA_S83L, parC_S80I, …) that
+    sp_gene structurally cannot see. The other five — qnrA1, qnrB6, qnrB19,
+    qnrS1, aac(6')-Ib-cr5 — are acquired genes that ARE present in the source
+    but do not survive tokenisation upstream, so they are recoverable there and
+    not here. Returns the message so a caller can surface it too.
+    """
+    if not _known_resistance_genes(drug):
+        return None
+    if curated_feature_columns(drug, columns):
+        return None
+    message = (
+        f"{drug}: none of its curated resistance genes match a feature column, so "
+        "every prediction will report 'statistical_association' — absence of "
+        "expressible evidence, NOT absence of known biology. Check that the "
+        "feature vocabulary and drug_database.KNOWN_RESISTANCE_GENES describe "
+        "genes the same way."
+    )
+    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    return message
+
+
 #: Name of the synthetic count column. Leading underscore so it cannot collide
 #: with an AMRFinderPlus element symbol, and so it is easy to filter out of
 #: anything user-facing — it is a model input, never evidence.
@@ -306,7 +463,7 @@ def curated_count_column(X: pd.DataFrame, drug: str) -> pd.Series | None:
     clinical resistance takes more. The model is not being told this; it falls
     out of counting curated genes.
     """
-    curated = [g for g in _known_resistance_genes(drug) if g in X.columns]
+    curated = curated_feature_columns(drug, X.columns)
     if not curated:
         return None
     return X[curated].sum(axis=1)
@@ -380,13 +537,20 @@ def fit_drug_model(
     """Fit one antibiotic's model on the given training row positions."""
     X, y, _ = dataset.xy_for_drug(drug)
 
+    # Curated evidence is resolved against the RAW columns, before the count
+    # column is appended or families are collapsed. Evidence shown to a human
+    # stays at the granularity the annotator actually reported, which is also
+    # what positive_drivers() returns.
+    raw_columns = list(X.columns)
+    warn_if_evidence_unavailable(drug, raw_columns)
+
     # One dense summary of the drug's curated resistance genes, alongside — not
     # instead of — the individual allele columns. See curated_count_column().
     counted_genes: list[str] = []
     if curated_count and not aggregate_families:
         counts = curated_count_column(X, drug)
         if counts is not None:
-            counted_genes = [g for g in _known_resistance_genes(drug) if g in X.columns]
+            counted_genes = curated_feature_columns(drug, X.columns)
             X = X.assign(**{CURATED_COUNT: counts})
 
     # Collapse allelic variants into gene families before fitting — see
@@ -439,7 +603,7 @@ def fit_drug_model(
         estimator=estimator,
         feature_names=list(X.columns),
         target_genes=dataset.target_genes(drug),
-        known_genes=_known_resistance_genes(drug),
+        known_genes=curated_feature_columns(drug, raw_columns),
         # CURATED_COUNT is a model input, never evidence — "_curated_count
         # detected" is meaningless to a clinician, and the genes behind it are
         # already reported individually.

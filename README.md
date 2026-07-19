@@ -48,6 +48,10 @@ pytest tests/ -v       # template-path tests, no API key needed
 python src/explainer.py  # manual run against synthetic fixtures
 ```
 
+To reproduce the real-data results from a fresh clone, follow
+`docs/REPRODUCING.md` — it is the runbook, and it is explicit about which step
+of the pipeline ships in the repo and which needs the FASTAs.
+
 ## Team roles
 
 | Person | Module | Files |
