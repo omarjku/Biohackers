@@ -78,7 +78,7 @@ def template_explain(pred: Prediction) -> str:
     return template.format(
         drug=pred.drug,
         species=pred.species,
-        confidence=pred.confidence,
+        confidence=_display_confidence(pred.confidence),
         features=_feature_list(pred),
         no_call_reason=pred.no_call_reason or "insufficient evidence",
         call=pred.call,
@@ -137,7 +137,7 @@ def explain(pred: Prediction, use_llm: bool = True) -> ExplanationResult:
         drug=pred.drug,
         explanation_text=text,
         disclaimer=DISCLAIMER,
-        confidence_label=f"{pred.confidence:.0%}",
+        confidence_label=f"{_display_confidence(pred.confidence):.0%}",
     )
 
 
@@ -209,6 +209,21 @@ def _markers(pred: Prediction) -> tuple[str, str]:
     return "None detected", locus
 
 
+def _display_confidence(probability: float) -> float:
+    """
+    Confidence as it may be SHOWN to a human — never 0% and never 100%.
+
+    Platt is fitted on 131-288 held-out rows here, which cannot resolve a
+    probability past roughly two significant figures, so `{p:.0%}` rendering a
+    calibrated 0.9999998 as "100%" is false precision on a research prototype.
+    Clamping inward keeps the printed number defensible and errs toward
+    understating confidence, which is the safe direction in this domain.
+
+    Display only — never feed this back into a metric or a decision threshold.
+    """
+    return min(max(probability, 0.01), 0.99)
+
+
 def _bio_stat_text(pred: Prediction) -> tuple[str, str]:
     """
     (bio_explanation, stat_explanation) — the honest split the brief requires:
@@ -220,7 +235,7 @@ def _bio_stat_text(pred: Prediction) -> tuple[str, str]:
     klass = DRUG_CLASS.get(drug, "this antibiotic class")
     locus = DRUG_LOCUS.get(drug, "the drug target")
     feats = _gene_names(pred)
-    conf = pred.confidence
+    conf = _display_confidence(pred.confidence)
 
     if pred.call == "not_applicable":
         return (
@@ -339,7 +354,10 @@ def clinical_summary(preds: list[Prediction], use_llm: bool = True) -> str:
     try:
         from openai import OpenAI
 
-        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        # Bounded: an analysis makes 4 calls (3 drugs + summary) inside the request
+        # path. The SDK default is 600s x 2 retries, so on bad conference wifi the
+        # "falls back to the template" promise above never gets a chance to fire.
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=8.0, max_retries=1)
         compact = [
             {"drug": p.drug, "call": p.call, "evidence_category": p.evidence_category,
              "confidence": round(p.confidence, 3),
@@ -379,7 +397,10 @@ def _llm_refine_report(pred: Prediction, bio: str, stat: str) -> tuple[str, str]
     try:
         from openai import OpenAI
 
-        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        # Bounded: an analysis makes 4 calls (3 drugs + summary) inside the request
+        # path. The SDK default is 600s x 2 retries, so on bad conference wifi the
+        # "falls back to the template" promise above never gets a chance to fire.
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"], timeout=8.0, max_retries=1)
         system = (
             "You refine two short antibiotic-resistance explanation strings for a "
             "clinician. Rules: only restate facts in the input, never invent genes "

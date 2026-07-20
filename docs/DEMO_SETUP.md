@@ -4,9 +4,13 @@ Goal: run the app in Docker on a clean computer and expose it at a short public
 URL for a live demo. Every command is copy-paste. Budget ~25 min the first time
 (most of it an unattended image build).
 
-> **Why a bundle, not `git clone`?** The trained model data (`data/processed/`)
-> and the example genomes (`data/raw/fasta_demo/`) are gitignored — they are NOT
-> on GitHub. Use the `genome-firewall-demo.zip` bundle, which contains them.
+> **`git clone` is enough.** The trained model data (`data/processed/`) and the
+> example genomes (`data/raw/fasta_demo/`) ARE tracked in the repo, so a clone
+> gives you everything the app needs at runtime. The `genome-firewall-demo.zip`
+> bundle is only an offline alternative if you have no network.
+>
+> (What is *not* tracked is `data/raw/fasta/` — the 119-genome FASTA pool, which
+> is over GitHub's per-file limit. Nothing in the demo path needs it.)
 
 ---
 

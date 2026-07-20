@@ -1,0 +1,18 @@
+{
+  "Ampicillin": {
+    "target_genes": [
+      "ftsI"
+    ]
+  },
+  "Ciprofloxacin": {
+    "target_genes": [
+      "gyrA",
+      "parC"
+    ]
+  },
+  "Trimethoprim": {
+    "target_genes": [
+      "folA"
+    ]
+  }
+}

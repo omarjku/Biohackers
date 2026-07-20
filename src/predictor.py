@@ -551,7 +551,11 @@ def fit_drug_model(
         counts = curated_count_column(X, drug)
         if counts is not None:
             counted_genes = curated_feature_columns(drug, X.columns)
-            X = X.assign(**{CURATED_COUNT: counts})
+            # concat rather than assign: the AMR matrix is wide and already
+            # block-fragmented, and assign() on it raises a pandas
+            # PerformanceWarning per fit. Same index alignment, same result,
+            # but it does not spam a UI console during a demo.
+            X = pd.concat([X, counts.rename(CURATED_COUNT)], axis=1)
 
     # Collapse allelic variants into gene families before fitting — see
     # gene_family(). The mapping is a pure function of the column name, so doing

@@ -86,7 +86,8 @@ Tracked (`data/raw/` is otherwise gitignored; these are explicit exceptions):
 | `genome_clusters.csv` | 3 coarse clusters (60/58/1), phylogroup-level; fallback only, not usable |
 
 Not tracked: `data/raw/fasta/` (187 MB compressed, over GitHub's 100 MB
-per-file limit) and `data/processed/` (derived — rebuild it, don't commit it).
+per-file limit). `data/processed/` IS committed despite being derived, because
+the live app and the bundled examples need it at runtime.
 
 **So the reproducible boundary is `files.zip`, not the FASTAs.** Everything
 downstream of AMRFinderPlus reproduces exactly from a clone. Regenerating
@@ -178,12 +179,12 @@ does not reproduce on the real data (see `CLAUDE.md`).
 - **Quote Ampicillin's 1.000s with the denominator attached** — that is
   `reports_real/`, roughly five answered rows per seed, which is what a
   near-perfect single-gene rule looks like at this sample size rather than a
-  solved problem. The scaled run puts the same drug at a believable 0.930 ±0.010
+  solved problem. The scaled run puts the same drug at a believable 0.939 ±0.006
   over 375 rows. Prefer the scaled figure; it is the one that survives scrutiny.
 - **Say which cluster weighting a quoted leakage gap came from.**
   `weight_by_cluster` changes the conclusion, not just the decimals.
 - **The leakage gap does not reproduce on real data, at either scale.** Scaled
-  gaps are −0.001 / −0.012 / −0.030, i.e. grouped splits score the same or
+  gaps are −0.001 / −0.001 / −0.030, i.e. grouped splits score the same or
   slightly better than random ones. Report that finding rather than leading with
   the synthetic table; "we measured our own headline claim and it did not hold
   here, and here is why" is a stronger position than a number that breaks under
