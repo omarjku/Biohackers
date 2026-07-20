@@ -52,11 +52,13 @@ amrfinder -u                     # install the AMR database to the default locat
 pip install -r requirements.txt  # ML + Streamlit deps in the same env
 ```
 
-Build the model data (writes `data/processed/`, which is gitignored — the app's
-first prediction needs it, else it errors):
+The model data (`data/processed/`) is **committed to the repo**, so a fresh
+clone already has what the app's first prediction needs — you do **not** have to
+rebuild it to run the app. Only rebuild it if you want to regenerate the dataset
+from scratch:
 
 ```bash
-python src/fetch_bvbrc.py         # pulls the 2,154-genome dataset from BV-BRC
+python src/fetch_bvbrc.py         # optional — pulls the 2,154-genome dataset from BV-BRC
 ```
 
 Run the app (from that env, so amrfinder is on PATH):
@@ -65,7 +67,8 @@ Run the app (from that env, so amrfinder is on PATH):
 streamlit run src/app.py
 ```
 
-Upload a FASTA, or use the bundled-example selector (any `*.fna` placed in
-`data/raw/fasta_demo/`, gitignored). Every result carries the mandatory
+Upload a FASTA, or use the bundled-example selector. The four bundled `*.fna`
+examples in `data/raw/fasta_demo/` are **committed** (each with a cached
+`.amrfinder.tsv`, so they render without a live annotator); drop additional
+`*.fna` there to extend the picker. Every result carries the mandatory
 "confirm with standard laboratory testing" disclaimer.
-```

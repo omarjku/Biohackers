@@ -24,6 +24,15 @@ from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
 
+#: The mandatory biosecurity disclaimer (non-negotiable rule 5). Defined here on
+#: the shared contract so it is the single source of truth; explainer.py imports
+#: it rather than re-declaring the wording.
+DISCLAIMER = (
+    "This is a research prototype. All results must be confirmed with "
+    "standard laboratory testing."
+)
+
+
 class SupportingFeature(BaseModel):
     """One piece of genomic evidence backing a prediction."""
     gene: str
@@ -63,6 +72,13 @@ class Prediction(BaseModel):
     no_call_reason: Optional[str] = None
     # Filled only when call == "no_call". Added by Person A after calibration
     # is wired up — until then, leave as None or a placeholder string.
+
+    disclaimer: str = DISCLAIMER
+    # Non-negotiable rule 5: every result must carry the "confirm with lab
+    # testing" disclaimer. Defaulted so any consumer that renders a Prediction
+    # directly (app.py, a JSON export, evaluation output) — not only the
+    # explainer path — ships the disclaimer. Backward-compatible: existing
+    # constructors omit it and get the default.
 
 
 class ExplanationResult(BaseModel):

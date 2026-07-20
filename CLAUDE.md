@@ -50,7 +50,7 @@ Actual layout (as of 2026-07-19; paths are relative to this file's directory, `*
     {Ampicillin,Ciprofloxacin,Trimethoprim} {Resistant,Susceptible}.csv
     raw/                        # files.zip (real AMRFinderPlus matrix + metadata),
                                 # genome_clusters.csv, genome_clusters_mash.csv, fasta/ (gitignored)
-    processed/                  # the four contract files, built by adapt_real_data.py (gitignored)
+    processed/                  # the contract files, built by adapt_real_data.py/fetch_bvbrc.py (committed so a clone runs the app; the dir is in .gitignore but the files are force-tracked)
     synthetic/                  # seeded fixtures (seed=7): features/labels/genomes/drug_targets
   docs/DATA_CONTRACT.md   # column contract data_io.py validates against
   docs/REPRODUCING.md     # clone -> numbers runbook; what ships and what doesn't

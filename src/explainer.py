@@ -22,12 +22,7 @@ limit, no credits), hedging the shared $50 OpenAI credit running out mid-demo.
 
 import os
 import re
-from schemas import Prediction, ExplanationResult
-
-DISCLAIMER = (
-    "This is a research prototype. All results must be confirmed with "
-    "standard laboratory testing."
-)
+from schemas import Prediction, ExplanationResult, DISCLAIMER  # DISCLAIMER: single source in schemas.py
 
 # --- 1. Template fallback ---------------------------------------------------
 
@@ -117,7 +112,15 @@ def llm_explain(pred: Prediction, base_text: str) -> str:
         temperature=0.2,
         max_tokens=200,
     )
-    return response.choices[0].message.content.strip()
+    content = response.choices[0].message.content
+    text = content.strip() if content else base_text
+    # Post-hoc honesty guard: the system prompt (rule 1) asks the model not to
+    # invent biology, but a prompt is a request, not a guarantee. Reject output
+    # naming an AMR gene absent from pred.supporting_features and fall back to the
+    # deterministic template — the same guard report_item()/clinical_summary() use.
+    if _contains_unlisted_gene(pred, text):
+        return base_text
+    return text
 
 
 # --- 3. Public entry point ---------------------------------------------------

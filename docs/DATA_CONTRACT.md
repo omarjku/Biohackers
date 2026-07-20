@@ -99,8 +99,8 @@ dependency that can silently invalidate the grouped-split results.
 
 ```
 data/
-  raw/          # organizer files, gitignored
-  processed/    # the four files above, gitignored
+  raw/          # organizer files, gitignored (except the explicit exceptions in REPRODUCING.md §2)
+  processed/    # the contract files above — committed to the repo, so a clone can run the app
   synthetic/    # generated equivalents, committed as test fixtures
 ```
 
